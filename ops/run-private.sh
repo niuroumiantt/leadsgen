@@ -7,7 +7,9 @@ if docker container inspect leadsgen-private >/dev/null 2>&1; then
   exit 1
 fi
 docker image inspect leadsgen:0.2.0 >/dev/null
-install -d -m 0700 -o 10001 -g 10001 /srv/leadsgen-data
+install -d -m 0700 /srv/leadsgen-data
+docker run --rm --network none --user 0 -v /srv/leadsgen-data:/data \
+  leadsgen:0.2.0 python -c 'import os; os.chown("/data", 10001, 10001)'
 install -d -m 0700 /srv/leadsgen-config
 if [ ! -f /srv/leadsgen-config/private.env ]; then
   umask 077
