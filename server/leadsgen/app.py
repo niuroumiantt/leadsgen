@@ -46,6 +46,21 @@ class ContactInput(BaseModel):
     email: str = Field(min_length=3, max_length=254)
 
 
+class AssignmentInput(BaseModel):
+    recipient: str = Field(min_length=3, max_length=254)
+    version: int = Field(ge=0)
+
+
+class AssignmentDecision(BaseModel):
+    version: int = Field(ge=0)
+
+
+class FollowupInput(BaseModel):
+    stage: Literal["待联系", "跟进中", "等待客户", "等待内部", "稍后跟进", "结束"]
+    next_step: str = Field(default="", max_length=500)
+    due_at: str = Field(default="", max_length=40)
+
+
 def deliver_one(store: Store, endpoint: str, token: str):
     if not endpoint or not token:
         return
@@ -143,14 +158,84 @@ def sync_mail(store: Store, endpoint: str, token: str):
         store.receive_events(payload)
 
 
+def sync_confirmed_leads(store: Store, endpoint: str, token: str):
+    """Pull Aimail's confirmed facts into the private admin review pipeline."""
+    if not endpoint or not token:
+        return
+    since, after = store.confirmed_lead_cursor()
+    response = httpx.get(
+        endpoint.rstrip("/") + "/v1/leads",
+        params={"since": since, "after": after, "limit": 200},
+        headers={"Authorization": "Bearer " + token},
+        timeout=15,
+        follow_redirects=False,
+        trust_env=False,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    items = payload.get("leads")
+    next_since = payload.get("next_since")
+    next_after = payload.get("next_after")
+    if (
+        payload.get("version") != "v1"
+        or not isinstance(items, list)
+        or not isinstance(next_since, str)
+        or not isinstance(next_after, int)
+        or next_since < since
+        or (next_since == since and next_after < after)
+    ):
+        raise ValueError("invalid_confirmed_mail_leads")
+    store.import_confirmed_leads(items, next_since, next_after)
+
+
+def sync_followup_access(store: Store, endpoint: str, token: str):
+    if not endpoint or not token:
+        return
+    for item in store.pending_followup_grants():
+        attempts = item["attempts"] + 1
+        try:
+            response = httpx.post(
+                endpoint.rstrip("/") + "/v1/followups/access",
+                json={
+                    "external_id": item["account_id"],
+                    "thread_id": int(item["thread_id"]),
+                    "recipient": item["recipient"],
+                },
+                headers={"Authorization": "Bearer " + token},
+                timeout=15,
+                follow_redirects=False,
+                trust_env=False,
+            )
+            response.raise_for_status()
+            receipt = response.json()
+            if (
+                receipt.get("external_id") != item["account_id"]
+                or receipt.get("thread_id") != item["thread_id"]
+                or receipt.get("owner", "").casefold() != item["recipient"].casefold()
+            ):
+                raise ValueError("invalid_followup_access_receipt")
+            store.mark_followup_grant(item["account_id"], success=True, attempts=attempts)
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            store.mark_followup_grant(
+                item["account_id"],
+                success=False,
+                attempts=attempts,
+                error="Aimail 尚未确认邮件线程权限，系统稍后重试",
+            )
+
+
 def worker(store: Store, stop: threading.Event, endpoint: str, token: str):
     while not stop.is_set():
         candidate = None
+        for sync in (sync_mail, sync_confirmed_leads, sync_followup_access):
+            try:
+                sync(store, endpoint, token)
+            except Exception:
+                log.warning("Mail integration step temporarily unavailable")
         try:
-            sync_mail(store, endpoint, token)
             deliver_one(store, endpoint, token)
         except Exception:
-            log.warning("Mail integration temporarily unavailable")
+            log.warning("Mail delivery step temporarily unavailable")
         try:
             candidate = store.claim()
             if candidate:
@@ -176,6 +261,8 @@ def create_app(
     worker_enabled: bool = True,
     endpoint: str = "",
     integration_token: str = "",
+    admin_users: tuple[str, ...] = (),
+    sales_users: tuple[str, ...] = (),
 ) -> FastAPI:
     store = Store(path)
     stop = threading.Event()
@@ -200,21 +287,39 @@ def create_app(
         TrustedHostMiddleware,
         allowed_hosts=allowed_hosts or ["127.0.0.1", "localhost", "testserver"],
     )
+    admin_users = frozenset(value.strip().casefold() for value in admin_users if value.strip())
+    sales_users = frozenset(value.strip().casefold() for value in sales_users if value.strip())
 
     @app.middleware("http")
     async def authentication(request: Request, call_next):
         if request.url.path == "/healthz":
             return await call_next(request)
         if proxy_key:
-            if not secrets.compare_digest(
-                request.headers.get("x-leadsgen-proxy-key", ""), proxy_key
-            ) or not request.headers.get("x-oa-user"):
+            if (
+                not secrets.compare_digest(
+                    request.headers.get("x-leadsgen-proxy-key", ""), proxy_key
+                )
+                or not request.headers.get("x-oa-user")
+                or not request.headers.get("x-oa-email")
+            ):
                 return JSONResponse({"detail": "请通过已登录的公司门户访问"}, status_code=401)
-            request.state.actor = request.headers["x-oa-user"][:200]
+            email = request.headers["x-oa-email"].strip().casefold()
+            if "@" not in email or len(email) > 254:
+                return JSONResponse({"detail": "登录身份邮箱无效"}, status_code=401)
+            request.state.identity = email
+            request.state.actor = email
+            if email in admin_users:
+                request.state.role = "admin"
+            elif email in sales_users:
+                request.state.role = "sales"
+            else:
+                return JSONResponse({"detail": "当前账号尚未获准使用 leadsgen"}, status_code=403)
         else:
             if request.client and request.client.host not in {"127.0.0.1", "::1", "testclient"}:
                 return JSONResponse({"detail": "本地模式仅允许本机访问"}, status_code=403)
             request.state.actor = "local-operator"
+            request.state.identity = "local-operator"
+            request.state.role = "admin"
         if request.method in {"POST", "PATCH", "DELETE"}:
             origin = request.headers.get("origin")
             expected = {
@@ -240,19 +345,80 @@ def create_app(
         return {"ok": True, "version": "0.2.0"}
 
     @app.get("/api/state")
-    def state():
+    def state(request: Request):
+        is_admin = request.state.role == "admin"
         return {
             "mode": "live",
-            "accounts": store.accounts(),
-            "jobs": store.jobs(),
-            "handoffs": store.handoffs(),
+            "identity": request.state.identity,
+            "role": request.state.role,
+            "members": sorted(sales_users) if is_admin else [],
+            "accounts": store.accounts()
+            if is_admin
+            else store.assigned_accounts(request.state.identity),
+            "jobs": store.jobs() if is_admin else [],
+            "handoffs": store.handoffs() if is_admin else [],
             "cadenceDays": CADENCE_DAYS,
             "policyVersion": POLICY_VERSION,
             "mailConnected": bool(endpoint and integration_token),
         }
 
+    @app.post("/api/accounts/{account_id}/assignment")
+    def assign_account(account_id: str, body: AssignmentInput, request: Request):
+        if request.state.role != "admin":
+            raise HTTPException(403, "只有线索管理员可以分配线索")
+        recipient = body.recipient.strip().casefold()
+        if recipient not in sales_users:
+            raise HTTPException(422, "接收人不是已登记的销售员工")
+        try:
+            return store.assign(account_id, recipient, request.state.identity, body.version)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/accounts/{account_id}/assignment/accept")
+    def accept_account(account_id: str, body: AssignmentDecision, request: Request):
+        if request.state.role != "sales":
+            raise HTTPException(403, "只有被分配的销售员工可以接手")
+        try:
+            return store.accept_assignment(account_id, request.state.identity, body.version)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/accounts/{account_id}/assignment/decline")
+    def decline_account(account_id: str, body: AssignmentDecision, request: Request):
+        if request.state.role != "sales":
+            raise HTTPException(403, "只有被分配的销售员工可以退回")
+        try:
+            return store.decline_assignment(account_id, request.state.identity, body.version)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/accounts/{account_id}/followup")
+    def update_account_followup(account_id: str, body: FollowupInput, request: Request):
+        if request.state.role != "sales":
+            raise HTTPException(403, "跟进状态只能由当前负责人更新")
+        try:
+            return store.update_followup(
+                account_id, request.state.identity, body.stage, body.next_step, body.due_at
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
     @app.post("/api/jobs", status_code=201)
     def create_job(body: JobInput, request: Request):
+        if request.state.role != "admin":
+            raise HTTPException(403, "只有线索管理员可以创建采集任务")
         try:
             job_id = store.create_job(
                 body.name, body.region, [s.model_dump() for s in body.seeds], request.state.actor
@@ -263,6 +429,8 @@ def create_app(
 
     @app.post("/api/handoffs")
     def handoff(body: HandoffInput, request: Request):
+        if request.state.role != "admin":
+            raise HTTPException(403, "只有线索管理员可以提交线索")
         try:
             return store.enqueue(body.ids, request.state.actor)
         except ValueError as exc:
@@ -270,6 +438,8 @@ def create_app(
 
     @app.post("/api/accounts/{account_id}/suppress")
     def suppress(account_id: str, request: Request):
+        if request.state.role != "admin":
+            raise HTTPException(403, "只有线索管理员可以排除客户")
         try:
             store.suppress(account_id, request.state.actor)
         except ValueError as exc:
@@ -278,6 +448,8 @@ def create_app(
 
     @app.post("/api/accounts/{account_id}/contact")
     def contact(account_id: str, body: ContactInput, request: Request):
+        if request.state.role != "admin":
+            raise HTTPException(403, "只有线索管理员可以核验联系邮箱")
         try:
             store.select_contact(account_id, body.email, request.state.actor)
         except ValueError as exc:
@@ -315,6 +487,8 @@ def main():
         allowed_hosts=os.environ.get("LEADSGEN_ALLOWED_HOSTS", "127.0.0.1,localhost").split(","),
         endpoint=os.environ.get("LEADSGEN_MAIL_URL", ""),
         integration_token=os.environ.get("LEADSGEN_MAIL_TOKEN", ""),
+        admin_users=tuple(os.environ.get("LEADSGEN_ADMIN_USERS", "").split(",")),
+        sales_users=tuple(os.environ.get("LEADSGEN_SALES_USERS", "").split(",")),
     )
     uvicorn.run(app, host=host, port=int(os.environ.get("LEADSGEN_PORT", "8910")))
 

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from .crawl import normalize_url
@@ -13,6 +14,17 @@ from .policy import CADENCE_DAYS, POLICY_VERSION, ROLE_NAMES
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS account (
  id TEXT PRIMARY KEY, domain TEXT NOT NULL UNIQUE, payload TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS account_assignment (
+ account_id TEXT PRIMARY KEY REFERENCES account(id), owner TEXT NOT NULL DEFAULT '',
+ pending TEXT NOT NULL DEFAULT '', version INTEGER NOT NULL DEFAULT 0,
+ updated_by TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS account_followup (
+ account_id TEXT PRIMARY KEY REFERENCES account(id),
+ stage TEXT NOT NULL CHECK(stage IN ('待联系','跟进中','等待客户','等待内部','稍后跟进','结束')),
+ next_step TEXT NOT NULL DEFAULT '', due_at TEXT NOT NULL DEFAULT '',
+ updated_by TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS job (
  id TEXT PRIMARY KEY, name TEXT NOT NULL, region TEXT NOT NULL, created_at TEXT NOT NULL
@@ -36,6 +48,15 @@ CREATE TABLE IF NOT EXISTS audit (
  resource TEXT NOT NULL, created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS integration_state (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS aimail_lead_map (
+ external_id TEXT PRIMARY KEY, account_id TEXT NOT NULL UNIQUE REFERENCES account(id),
+ updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS followup_access_sync (
+ account_id TEXT PRIMARY KEY REFERENCES account(id), recipient TEXT NOT NULL,
+ thread_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0,
+ updated_at TEXT NOT NULL, next_at TEXT NOT NULL, last_error TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -65,10 +86,166 @@ class Store:
 
     def accounts(self) -> list[dict]:
         with self.connect() as c:
-            return [
-                json.loads(r[0])
-                for r in c.execute("SELECT payload FROM account ORDER BY updated_at DESC")
-            ]
+            rows = c.execute("SELECT id,payload FROM account ORDER BY updated_at DESC").fetchall()
+            result = []
+            for row in rows:
+                account = json.loads(row["payload"])
+                assignment = c.execute(
+                    "SELECT owner,pending,version,updated_by,updated_at FROM account_assignment "
+                    "WHERE account_id=?",
+                    (row["id"],),
+                ).fetchone()
+                mail_access = c.execute(
+                    "SELECT state,last_error FROM followup_access_sync WHERE account_id=?",
+                    (row["id"],),
+                ).fetchone()
+                followup = c.execute(
+                    "SELECT stage,next_step,due_at,updated_by,updated_at FROM account_followup "
+                    "WHERE account_id=?",
+                    (row["id"],),
+                ).fetchone()
+                account["assignment"] = (
+                    dict(assignment)
+                    if assignment
+                    else {
+                        "owner": "",
+                        "pending": "",
+                        "version": 0,
+                        "updated_by": "",
+                        "updated_at": "",
+                    }
+                )
+                account["followup"] = dict(followup) if followup else None
+                account["assignment"]["mail_access_status"] = (
+                    mail_access["state"] if mail_access else "not_required"
+                )
+                account["assignment"]["mail_access_error"] = (
+                    mail_access["last_error"] if mail_access else ""
+                )
+                result.append(account)
+            return result
+
+    def assigned_accounts(self, identity: str) -> list[dict]:
+        return [
+            account
+            for account in self.accounts()
+            if identity in {account["assignment"]["owner"], account["assignment"]["pending"]}
+        ]
+
+    def assign(self, account_id: str, recipient: str, actor: str, version: int) -> dict:
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            if not c.execute("SELECT 1 FROM account WHERE id=?", (account_id,)).fetchone():
+                raise LookupError("客户不存在")
+            current = c.execute(
+                "SELECT owner,pending,version FROM account_assignment WHERE account_id=?",
+                (account_id,),
+            ).fetchone()
+            owner = current["owner"] if current else ""
+            pending = current["pending"] if current else ""
+            current_version = current["version"] if current else 0
+            if current_version != version or pending:
+                raise ValueError("线索状态已变化，请刷新后重试")
+            c.execute(
+                "INSERT INTO account_assignment(account_id,owner,pending,version,"
+                "updated_by,updated_at) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(account_id) DO UPDATE SET pending=excluded.pending,"
+                "version=excluded.version,updated_by=excluded.updated_by,updated_at=excluded.updated_at",
+                (account_id, owner, recipient, current_version + 1, actor, now()),
+            )
+            self.audit(c, actor, "assignment.offered", account_id)
+            return {"owner": owner, "pending": recipient, "version": current_version + 1}
+
+    def accept_assignment(self, account_id: str, actor: str, version: int) -> dict:
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            current = c.execute(
+                "SELECT owner,pending,version FROM account_assignment WHERE account_id=?",
+                (account_id,),
+            ).fetchone()
+            if not current:
+                raise LookupError("没有待接手的线索")
+            if current["pending"] != actor:
+                raise PermissionError("这条线索没有分配给你")
+            if current["version"] != version:
+                raise ValueError("线索状态已变化，请刷新后重试")
+            new_version = version + 1
+            c.execute(
+                "UPDATE account_assignment SET owner=?,pending='',version=?,"
+                "updated_by=?,updated_at=? "
+                "WHERE account_id=?",
+                (actor, new_version, actor, now(), account_id),
+            )
+            c.execute(
+                "INSERT INTO account_followup(account_id,stage,updated_by,updated_at)"
+                " VALUES(?,?,?,?) "
+                "ON CONFLICT(account_id) DO NOTHING",
+                (account_id, "待联系", actor, now()),
+            )
+            account_row = c.execute(
+                "SELECT payload FROM account WHERE id=?", (account_id,)
+            ).fetchone()
+            account = json.loads(account_row[0])
+            if account.get("sourceType") == "sales_inbound" and account.get("aimailThreadId"):
+                c.execute(
+                    "INSERT INTO followup_access_sync "
+                    "(account_id,recipient,thread_id,updated_at,next_at) VALUES(?,?,?,?,?) "
+                    "ON CONFLICT(account_id) DO UPDATE SET recipient=excluded.recipient,"
+                    "thread_id=excluded.thread_id,state='queued',updated_at=excluded.updated_at,"
+                    "next_at=excluded.next_at,"
+                    "last_error=''",
+                    (account_id, actor, account["aimailThreadId"], now(), now()),
+                )
+            self.audit(c, actor, "assignment.accepted", account_id)
+            return {"owner": actor, "pending": "", "version": new_version}
+
+    def decline_assignment(self, account_id: str, actor: str, version: int) -> dict:
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            current = c.execute(
+                "SELECT owner,pending,version FROM account_assignment WHERE account_id=?",
+                (account_id,),
+            ).fetchone()
+            if not current:
+                raise LookupError("没有待接手的线索")
+            if current["pending"] != actor:
+                raise PermissionError("这条线索没有分配给你")
+            if current["version"] != version:
+                raise ValueError("线索状态已变化，请刷新后重试")
+            new_version = version + 1
+            c.execute(
+                "UPDATE account_assignment SET pending='',version=?,updated_by=?,updated_at=? "
+                "WHERE account_id=?",
+                (new_version, actor, now(), account_id),
+            )
+            self.audit(c, actor, "assignment.declined", account_id)
+            return {"owner": current["owner"], "pending": "", "version": new_version}
+
+    def update_followup(
+        self, account_id: str, actor: str, stage: str, next_step: str, due_at: str
+    ) -> dict:
+        allowed = {"待联系", "跟进中", "等待客户", "等待内部", "稍后跟进", "结束"}
+        if stage not in allowed:
+            raise ValueError("跟进阶段无效")
+        if len(next_step) > 500 or len(due_at) > 40:
+            raise ValueError("下一步内容过长")
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            current = c.execute(
+                "SELECT owner FROM account_assignment WHERE account_id=?", (account_id,)
+            ).fetchone()
+            if not current or current["owner"] != actor:
+                raise PermissionError("只有当前负责人可以更新跟进状态")
+            c.execute(
+                "INSERT INTO account_followup(account_id,stage,next_step,due_at,"
+                "updated_by,updated_at) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(account_id) DO UPDATE SET stage=excluded.stage, "
+                "next_step=excluded.next_step,due_at=excluded.due_at,updated_by=excluded.updated_by,"
+                "updated_at=excluded.updated_at",
+                (account_id, stage, next_step.strip(), due_at.strip(), actor, now()),
+            )
+            self.audit(c, actor, "followup.updated", account_id)
+            return {"stage": stage, "next_step": next_step.strip(), "due_at": due_at.strip()}
 
     def jobs(self) -> list[dict]:
         with self.connect() as c:
@@ -195,7 +372,7 @@ class Store:
                 if not row:
                     raise ValueError("客户不存在")
                 a = json.loads(row[0])
-                if a["stage"] != "ready":
+                if a["stage"] != "ready" or a.get("sourceType") == "sales_inbound":
                     skipped.append(account_id)
                     continue
                 handoff_id = "ho_" + uuid.uuid4().hex
@@ -263,6 +440,136 @@ class Store:
                 "SELECT value FROM integration_state WHERE key='mail_cursor'"
             ).fetchone()
             return int(row[0]) if row else 0
+
+    def confirmed_lead_cursor(self) -> tuple[str, int]:
+        with self.connect() as c:
+            rows = dict(
+                c.execute(
+                    "SELECT key,value FROM integration_state "
+                    "WHERE key IN ('aimail_lead_since','aimail_lead_after')"
+                ).fetchall()
+            )
+        return rows.get("aimail_lead_since", ""), int(rows.get("aimail_lead_after", "0"))
+
+    def pending_followup_grants(self) -> list[dict]:
+        with self.connect() as c:
+            rows = c.execute(
+                "SELECT account_id,recipient,thread_id,attempts FROM followup_access_sync "
+                "WHERE state='queued' AND next_at<=? ORDER BY updated_at LIMIT 50",
+                (now(),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def mark_followup_grant(
+        self, account_id: str, *, success: bool, attempts: int, error: str = ""
+    ):
+        with self.connect() as c:
+            c.execute(
+                "UPDATE followup_access_sync "
+                "SET state=?,attempts=?,updated_at=?,next_at=?,last_error=? "
+                "WHERE account_id=?",
+                (
+                    "granted" if success else "queued",
+                    attempts,
+                    now(),
+                    now()
+                    if success
+                    else (
+                        datetime.now(UTC) + timedelta(seconds=min(3600, 30 * 2 ** min(attempts, 7)))
+                    ).isoformat(),
+                    "" if success else error,
+                    account_id,
+                ),
+            )
+
+    def import_confirmed_leads(self, items: list[dict], next_since: str, next_after: int) -> int:
+        """Import only Aimail's human-confirmed sales leads; never copy message bodies."""
+        imported = 0
+        with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            for item in items:
+                source = item.get("source") or {}
+                external_id = str(item.get("id", "")).strip()
+                if (
+                    item.get("version") != "lead@1"
+                    or not external_id
+                    or source.get("mailbox", "").casefold() != "sales@glocalstorage.com"
+                ):
+                    raise ValueError("invalid_confirmed_mail_lead")
+                exists = c.execute(
+                    "SELECT account_id FROM aimail_lead_map WHERE external_id=?", (external_id,)
+                ).fetchone()
+                if exists:
+                    c.execute(
+                        "UPDATE aimail_lead_map SET updated_at=? WHERE external_id=?",
+                        (now(), external_id),
+                    )
+                    continue
+                digest = hashlib.sha256(external_id.encode()).hexdigest()[:24]
+                account_id = "mail_" + digest
+                thread_id = str(source.get("thread_id", ""))[:80]
+                email = str(item.get("email", ""))[:254].strip()
+                company = str(item.get("company", ""))[:200].strip() or "待核实公司"
+                wants = str(item.get("wants", ""))[:1000].strip()
+                contact = str(item.get("contact", ""))[:200].strip()
+                region = str(item.get("region", "")).strip()
+                if region not in {"美国", "欧洲", "中国", "东南亚", "其他"}:
+                    region = "其他"
+                account = {
+                    "id": account_id,
+                    "name": company,
+                    "legal": "",
+                    "domain": "mail-lead-" + digest + ".invalid",
+                    "website": "",
+                    "region": region,
+                    "country": region if region != "其他" else "待核验",
+                    "industry": "待核验",
+                    "tier": "2B",
+                    "model": "来信询盘",
+                    "email": email,
+                    "department": "sales@ 来信",
+                    "supermicro": "待核实",
+                    "products": [],
+                    "stage": "ready",
+                    "mail": "replied",
+                    "score": 0,
+                    "summary": wants or "已由 Aimail 用户确认的客户来信；请查看原邮件线程。",
+                    "reason": "来源：sales@ 客户来信；邮件原文、附件和线程均留在 Aimail。",
+                    "contacts": [],
+                    "evidence": {
+                        "email": email,
+                        "role": "business",
+                        "url": "",
+                        "excerpt": "客户通过 sales@ 发来询盘；请在 Aimail 查看原线程。",
+                        "observedAt": str(item.get("confirmed_at", ""))[:80],
+                        "mailRoute": "inbound",
+                    },
+                    "mailRoute": "inbound",
+                    "observedAt": str(item.get("confirmed_at", ""))[:80],
+                    "classificationVerified": True,
+                    "sourceType": "sales_inbound",
+                    "sourceMailbox": "sales@glocalstorage.com",
+                    "aimailLeadId": external_id,
+                    "aimailThreadId": thread_id,
+                    "aimailContact": contact,
+                    "aimailQuantity": str(item.get("quantity", ""))[:200],
+                }
+                c.execute(
+                    "INSERT INTO account(id,domain,payload,updated_at) VALUES(?,?,?,?)",
+                    (account_id, account["domain"], json.dumps(account, ensure_ascii=False), now()),
+                )
+                c.execute(
+                    "INSERT INTO aimail_lead_map(external_id,account_id,updated_at) VALUES(?,?,?)",
+                    (external_id, account_id, now()),
+                )
+                self.audit(c, "aimail-integration", "lead.imported", account_id)
+                imported += 1
+            c.executemany(
+                "INSERT INTO integration_state(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (("aimail_lead_since", next_since), ("aimail_lead_after", str(next_after))),
+            )
+        return imported
 
     def select_contact(self, account_id: str, email: str, actor: str):
         with self.connect() as c:
