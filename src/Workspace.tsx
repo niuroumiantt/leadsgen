@@ -4,6 +4,7 @@ import {
   App,
   Button,
   Card,
+  Dropdown,
   Descriptions,
   Drawer,
   Empty,
@@ -25,6 +26,9 @@ import {
   ReloadOutlined,
   SearchOutlined,
   TeamOutlined,
+  UserOutlined,
+  LogoutOutlined,
+  SettingOutlined,
 } from "@ant-design/icons";
 import { regions, stageInfo, mailInfo } from "./data";
 import type { Account } from "./data";
@@ -393,6 +397,17 @@ export default function Workspace() {
             >
               刷新
             </Button>
+            {state?.identity && <Dropdown
+              trigger={["click"]}
+              menu={{ items: [
+                { key: "identity", label: `当前账号：${state.identity}`, disabled: true },
+                { type: "divider" },
+                { key: "profile", icon: <SettingOutlined />, label: <a href="https://login.glocalstorage.cn/if/user/#/settings">个人资料与账号设置</a> },
+                { key: "logout", icon: <LogoutOutlined />, danger: true, label: <a href="/oauth2/sign_out?rd=https%3A%2F%2Flogin.glocalstorage.cn%2Fif%2Fuser%2F">退出当前应用</a> },
+              ] }}
+            >
+              <Button aria-label={`当前账号 ${state.identity}`} icon={<UserOutlined />}>{state.identity}</Button>
+            </Dropdown>}
           </Space>
         </Layout.Header>
         <nav className="mobile-navigation" aria-label="主导航">
