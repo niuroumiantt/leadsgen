@@ -55,6 +55,10 @@ class AssignmentDecision(BaseModel):
     version: int = Field(ge=0)
 
 
+class AssignmentDecline(AssignmentDecision):
+    reason: str = Field(min_length=1, max_length=1000)
+
+
 class FollowupInput(BaseModel):
     stage: Literal["待联系", "跟进中", "等待客户", "等待内部", "稍后跟进", "结束"]
     next_step: str = Field(default="", max_length=500)
@@ -188,6 +192,75 @@ def sync_confirmed_leads(store: Store, endpoint: str, token: str):
     store.import_confirmed_leads(items, next_since, next_after)
 
 
+def send_assignment_notices(store: Store, endpoint: str, token: str):
+    if not endpoint or not token:
+        return
+    with store.connect() as c:
+        # Single worker; durable immutable requests are safe to retry at the idempotent receiver.
+        rows = c.execute(
+            "SELECT n.* FROM assignment_notice n WHERE n.state='queued' AND n.next_at<=?",
+            (datetime.now(UTC).isoformat(),),
+        ).fetchall()
+    for row in rows:
+        with store.connect() as c:
+            current = c.execute(
+                "SELECT pending,version FROM account_assignment WHERE account_id=?",
+                (row["account_id"],),
+            ).fetchone()
+            if not current or current["version"] != row["version"] or not current["pending"]:
+                c.execute("UPDATE assignment_notice SET state='cancelled' WHERE id=?", (row["id"],))
+                continue
+        try:
+            response = httpx.post(
+                endpoint.rstrip("/") + "/v1/handoff-notifications",
+                json=json.loads(row["payload"]),
+                headers={"Authorization": "Bearer " + token},
+                timeout=45,
+                follow_redirects=False,
+                trust_env=False,
+            )
+            response.raise_for_status()
+            result = response.json()
+            if result.get("id") != row["id"] or result.get("state") not in {"sent", "unknown"}:
+                raise ValueError("invalid_notification_receipt")
+            with store.connect() as c:
+                c.execute(
+                    "UPDATE assignment_notice SET state=?,last_error='' WHERE id=?",
+                    (result["state"], row["id"]),
+                )
+        except (httpx.HTTPError, ValueError):
+            with store.connect() as c:
+                c.execute(
+                    "UPDATE assignment_notice SET "
+                    "attempts=attempts+1,next_at=?,last_error=? WHERE id=?",
+                    (
+                        (
+                            datetime.now(UTC)
+                            + timedelta(seconds=min(3600, 30 * 2 ** min(row["attempts"], 7)))
+                        ).isoformat(),
+                        "通知尚未确认发送，请检查发件配置或原邮件大小",
+                        row["id"],
+                    ),
+                )
+
+
+def sync_mail_handoffs(store: Store, endpoint: str, token: str):
+    if not endpoint or not token:
+        return
+    response = httpx.get(
+        endpoint.rstrip("/") + "/v1/followups",
+        headers={"Authorization": "Bearer " + token},
+        timeout=15,
+        follow_redirects=False,
+        trust_env=False,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("version") != "followups@1" or not isinstance(payload.get("items"), list):
+        raise ValueError("invalid_mail_handoffs")
+    store.import_mail_handoffs(payload["items"])
+
+
 def sync_followup_access(store: Store, endpoint: str, token: str):
     if not endpoint or not token:
         return
@@ -227,7 +300,13 @@ def sync_followup_access(store: Store, endpoint: str, token: str):
 def worker(store: Store, stop: threading.Event, endpoint: str, token: str):
     while not stop.is_set():
         candidate = None
-        for sync in (sync_mail, sync_confirmed_leads, sync_followup_access):
+        for sync in (
+            sync_mail,
+            sync_confirmed_leads,
+            sync_followup_access,
+            sync_mail_handoffs,
+            send_assignment_notices,
+        ):
             try:
                 sync(store, endpoint, token)
             except Exception:
@@ -376,11 +455,40 @@ def create_app(
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
+    def decide_projected(account_id, identity, version, action, reason=""):
+        account = next(
+            (a for a in store.assigned_accounts(identity) if a["id"] == account_id), None
+        )
+        if not account or account.get("assignmentAuthority") != "aimail":
+            return None
+        if account["assignment"]["pending"] != identity:
+            raise HTTPException(403, "这条线索没有等待你接手")
+        if not endpoint or not integration_token:
+            raise HTTPException(503, "邮件系统尚未连接")
+        try:
+            response = httpx.post(
+                endpoint.rstrip("/") + f"/v1/followups/{account['aimailThreadId']}/decision",
+                json=dict(actor=identity, version=version, action=action, reason=reason),
+                headers={"Authorization": "Bearer " + integration_token},
+                timeout=15,
+                follow_redirects=False,
+                trust_env=False,
+            )
+            response.raise_for_status()
+            result = response.json()
+            sync_mail_handoffs(store, endpoint, integration_token)
+            return result
+        except (httpx.HTTPError, ValueError) as exc:
+            raise HTTPException(409, "邮件交接结果尚未确认，请刷新状态后重试") from exc
+
     @app.post("/api/accounts/{account_id}/assignment/accept")
     def accept_account(account_id: str, body: AssignmentDecision, request: Request):
         if request.state.role != "sales":
             raise HTTPException(403, "只有被分配的销售员工可以接手")
         try:
+            projected = decide_projected(account_id, request.state.identity, body.version, "accept")
+            if projected is not None:
+                return projected
             return store.accept_assignment(account_id, request.state.identity, body.version)
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
@@ -390,15 +498,33 @@ def create_app(
             raise HTTPException(409, str(exc)) from exc
 
     @app.post("/api/accounts/{account_id}/assignment/decline")
-    def decline_account(account_id: str, body: AssignmentDecision, request: Request):
+    def decline_account(account_id: str, body: AssignmentDecline, request: Request):
         if request.state.role != "sales":
             raise HTTPException(403, "只有被分配的销售员工可以退回")
         try:
-            return store.decline_assignment(account_id, request.state.identity, body.version)
+            if not body.reason.strip():
+                raise ValueError("请填写退回原因")
+            projected = decide_projected(
+                account_id, request.state.identity, body.version, "decline", body.reason
+            )
+            if projected is not None:
+                return projected
+            return store.decline_assignment(
+                account_id, request.state.identity, body.version, body.reason
+            )
         except LookupError as exc:
             raise HTTPException(404, str(exc)) from exc
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+
+    @app.post("/api/accounts/{account_id}/assignment/cancel")
+    def cancel_account(account_id: str, body: AssignmentDecision, request: Request):
+        if request.state.role != "admin":
+            raise HTTPException(403, "只有管理员可以撤回交接")
+        try:
+            return store.cancel_assignment(account_id, request.state.identity, body.version)
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 

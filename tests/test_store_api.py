@@ -369,3 +369,212 @@ def test_external_public_contact_can_be_reviewed_but_handoff_locks_it(tmp_path):
     store.enqueue([aid], "owner")
     with pytest.raises(ValueError):
         store.select_contact(aid, "owner@external.example", "owner")
+
+
+def test_assignment_history_return_reason_cancel_and_stale_decision(tmp_path):
+    store, _ = seeded(tmp_path)
+    aid = store.accounts()[0]["id"]
+    store.assign(aid, "isaac@example.com", "admin@example.com", 0)
+    store.decline_assignment(aid, "isaac@example.com", 1, "产品不在我的业务范围")
+    result = store.accounts()[0]["assignment"]
+    assert result["status"] == "returned"
+    assert result["history"][0]["reason"] == "产品不在我的业务范围"
+    store.assign(aid, "isaac@example.com", "admin@example.com", 2)
+    store.cancel_assignment(aid, "admin@example.com", 3)
+    with pytest.raises(PermissionError):
+        store.accept_assignment(aid, "isaac@example.com", 3)
+    assert not store.assigned_accounts("isaac@example.com")
+    store.assign(aid, "isaac@example.com", "admin@example.com", 4)
+    store.accept_assignment(aid, "isaac@example.com", 5)
+    with pytest.raises(ValueError):
+        store.update_followup(aid, "isaac@example.com", "跟进中", "电话联系", "tomorrow")
+    store.update_followup(aid, "isaac@example.com", "跟进中", "电话联系", "2026-10-01")
+    assert store.accounts()[0]["followup"]["next_step"] == "电话联系"
+
+
+def test_mail_handoff_projection_preserves_owner_and_blocks_double_assignment(tmp_path):
+    store = Store(tmp_path / "app.sqlite3")
+    item = dict(
+        thread_id=232,
+        version=1,
+        owner="larry@example.com",
+        pending="isaac@example.com",
+        subject="Customer inquiry",
+        email="buyer@example.com",
+        summary="20 servers",
+        updated_at="2026-09-27T10:00:00Z",
+        history=[],
+    )
+    store.import_mail_handoffs([item])
+    store.import_mail_handoffs([item])
+    assert len(store.accounts()) == 1
+    assert len(store.assigned_accounts("isaac@example.com")) == 1
+    assert not store.assigned_accounts("other@example.com")
+    with pytest.raises(ValueError):
+        store.accept_assignment("handoff_232", "isaac@example.com", 1)
+    item.update(version=2, owner="isaac@example.com", pending="")
+    store.import_mail_handoffs([item])
+    assert store.accounts()[0]["assignment"]["status"] == "accepted"
+    assert not store.assigned_accounts("larry@example.com")
+    item.update(version=1, owner="larry@example.com", pending="isaac@example.com")
+    store.import_mail_handoffs([item])
+    assert store.accounts()[0]["assignment"]["owner"] == "isaac@example.com"
+
+
+def test_notification_outbox_uses_snapshot_and_cancels_withdrawn_assignment(tmp_path, monkeypatch):
+    from leadsgen.app import send_assignment_notices
+
+    store, _ = seeded(tmp_path)
+    aid = store.accounts()[0]["id"]
+    store.assign(aid, "isaac@example.com", "admin@example.com", 0)
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append(kwargs["json"])
+        return httpx.Response(
+            200, request=httpx.Request("POST", url), json={"id": f"{aid}:1", "state": "sent"}
+        )
+
+    monkeypatch.setattr("leadsgen.app.httpx.post", post)
+    send_assignment_notices(store, "http://mail.test", "test")
+    send_assignment_notices(store, "http://mail.test", "test")
+    assert len(calls) == 1
+    assert calls[0]["recipient"] == "isaac@example.com"
+    assert store.accounts()[0]["assignment"]["notification"]["state"] == "sent"
+    store.cancel_assignment(aid, "admin@example.com", 1)
+    store.assign(aid, "isaac@example.com", "admin@example.com", 2)
+    store.cancel_assignment(aid, "admin@example.com", 3)
+    send_assignment_notices(store, "http://mail.test", "test")
+    assert len(calls) == 1
+    assert store.accounts()[0]["assignment"]["notification"]["state"] == "cancelled"
+
+
+def test_new_mail_offer_queues_once_but_historical_offer_never_sends(tmp_path):
+    import json
+
+    store = Store(tmp_path / "app.sqlite3")
+    item = dict(
+        thread_id=91,
+        version=1,
+        owner="larry@example.com",
+        pending="isaac@example.com",
+        subject="RFQ",
+        email="buyer@example.com",
+        summary="GPU servers",
+        updated_at="2026-09-27T10:00:00Z",
+        history=[
+            dict(
+                actor="larry@example.com",
+                action="offer",
+                version=1,
+                at="2026-09-27T10:00:00Z",
+                recipient="isaac@example.com",
+            )
+        ],
+    )
+    store.import_mail_handoffs([item])
+    with store.connect() as c:
+        assert c.execute("SELECT count(*) FROM assignment_notice").fetchone()[0] == 0
+    item["version"] = 3
+    item["history"].append(
+        dict(
+            actor="larry@example.com",
+            action="offer",
+            version=3,
+            at=item["updated_at"],
+            notify=True,
+            recipient="isaac@example.com",
+        )
+    )
+    store.import_mail_handoffs([item])
+    store.import_mail_handoffs([item])
+    with store.connect() as c:
+        rows = c.execute("SELECT payload FROM assignment_notice").fetchall()
+        assert len(rows) == 1
+        payload = json.loads(rows[0][0])
+        assert payload["thread_id"] == 91
+        assert payload["account_id"] == "handoff_91"
+        assert payload["recipient"] == "isaac@example.com"
+    item.update(version=4, pending="")
+    item["history"].append(
+        dict(
+            actor="isaac@example.com",
+            action="decline",
+            version=4,
+            at=item["updated_at"],
+            reason="不负责该产品",
+        )
+    )
+    store.import_mail_handoffs([item])
+    assert store.accounts()[0]["assignment"]["status"] == "returned"
+    assert store.accounts()[0]["assignment"]["history"][0]["reason"] == "不负责该产品"
+
+
+def test_projected_decision_checks_identity_and_refreshes_source(tmp_path, monkeypatch):
+    store = Store(tmp_path / "app.sqlite3")
+    item = dict(
+        thread_id=232,
+        version=1,
+        owner="larry@example.com",
+        pending="isaac@example.com",
+        subject="Customer inquiry",
+        updated_at="2026-09-27T10:00:00Z",
+        history=[],
+    )
+    store.import_mail_handoffs([item])
+    app = create_app(
+        tmp_path / "app.sqlite3",
+        worker_enabled=False,
+        proxy_key="p" * 40,
+        endpoint="http://mail.test",
+        integration_token="test",
+        admin_users=("larry@example.com",),
+        sales_users=("isaac@example.com", "other@example.com"),
+    )
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append(kwargs["json"])
+        item.update(version=2, owner="isaac@example.com", pending="")
+        return httpx.Response(200, request=httpx.Request("POST", url), json=item)
+
+    def get(url, **kwargs):
+        return httpx.Response(
+            200, request=httpx.Request("GET", url), json={"version": "followups@1", "items": [item]}
+        )
+
+    monkeypatch.setattr("leadsgen.app.httpx.post", post)
+    monkeypatch.setattr("leadsgen.app.httpx.get", get)
+    headers = {
+        "X-Leadsgen-Proxy-Key": "p" * 40,
+        "X-OA-User": "other",
+        "X-OA-Email": "other@example.com",
+        "X-Leadsgen-Client": "web-v1",
+    }
+    with TestClient(app) as client:
+        assert client.post(
+            "/api/accounts/handoff_232/assignment/accept", headers=headers, json={"version": 1}
+        ).status_code in (403, 409)
+        assert calls == []
+        headers.update({"X-OA-User": "isaac", "X-OA-Email": "isaac@example.com"})
+        assert (
+            client.post(
+                "/api/accounts/handoff_232/assignment/cancel", headers=headers, json={"version": 1}
+            ).status_code
+            == 403
+        )
+        assert (
+            client.post(
+                "/api/accounts/handoff_232/assignment/accept", headers=headers, json={"version": 1}
+            ).status_code
+            == 200
+        )
+        assert calls == [dict(actor="isaac@example.com", version=1, action="accept", reason="")]
+        assert store.accounts()[0]["assignment"]["status"] == "accepted"
+        assert (
+            client.post(
+                "/api/accounts/handoff_232/assignment/accept", headers=headers, json={"version": 1}
+            ).status_code
+            == 403
+        )
+        assert len(calls) == 1
