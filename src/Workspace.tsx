@@ -315,7 +315,7 @@ export default function Workspace() {
   };
   const items = isAdmin
     ? [
-        { key: "accounts", icon: <TeamOutlined />, label: "线索初筛" },
+        { key: "accounts", icon: <TeamOutlined />, label: "线索总览" },
         { key: "jobs", icon: <CompassOutlined />, label: "采集任务" },
         { key: "outreach", icon: <LinkOutlined />, label: "交接与联系状态" },
       ]
@@ -878,7 +878,7 @@ export default function Workspace() {
                   <Paragraph>由 Aimail 人工确认并同步；邮件正文、附件和线程仍保存在 Aimail。</Paragraph>
                   {detail.aimailQuantity && <Paragraph>数量信息：{detail.aimailQuantity}</Paragraph>}
                   {(detail.assignmentAuthority === "aimail" || detail.assignment?.mail_access_status === "granted") && detail.aimailThreadId ? (
-                    <a href={`https://mail.glocalstorage.cn/followups/${detail.aimailThreadId}`} target="_blank" rel="noreferrer">打开 Aimail 中已授权的邮件线程 ↗</a>
+                    <a href={`https://mail.glocalstorage.cn/${isAdmin ? "t" : "followups"}/${detail.aimailThreadId}`} target="_blank" rel="noreferrer">打开 Aimail 中已授权的邮件线程 ↗</a>
                   ) : <Text type="secondary">{detail.assignment?.mail_access_error || "邮件线程权限同步中；完成后会出现安全链接。"}</Text>}
                   <div><Text copyable>邮件线程 ID：{detail.aimailThreadId || "未提供"}</Text></div>
                   <div><Text type="secondary">确认线索 ID：{detail.aimailLeadId}</Text></div>
@@ -929,8 +929,8 @@ export default function Workspace() {
               {isAdmin && detail.assignment.notification?.state === "unknown" && <Alert type="warning" showIcon title="发送结果待核对" description="请核对管理员发件记录。系统不会自动重复发送这封通知，分配仍保持待接手。" style={{marginBottom:16}} />}
               {detail.assignmentAuthority === "aimail" && isAdmin ? (
                 <><Paragraph>当前负责人：{detail.assignment.owner || "未分配"}；待接手：{detail.assignment.pending || "无"}</Paragraph>
-                <Button type="primary" href={`https://mail.glocalstorage.cn/followups/${detail.aimailThreadId}`}>查看原邮件交接</Button>
-                <Paragraph type="secondary">已有邮件交接的负责人和接手结果自动同步，无需重复接手。</Paragraph></>
+                <Button type="primary" href={`https://mail.glocalstorage.cn/t/${detail.aimailThreadId}`}>查看共享邮箱原邮件</Button>
+                <Paragraph type="secondary">已有邮件交接的负责人和接手结果自动同步，无需重复接手。查看原邮件时请选择 sales@ 共享邮箱。</Paragraph></>
               ) : isAdmin ? (
                 <>
                   <Paragraph>当前负责人：{detail.assignment?.owner || "未分配"}；待接手：{detail.assignment?.pending || "无"}</Paragraph>
