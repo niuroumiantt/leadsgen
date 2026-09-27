@@ -196,7 +196,7 @@ class Store:
                         tier="2B",
                         model="邮件交接",
                         email=item.get("email", ""),
-                        department="sales@ 来信",
+                        department=item.get("mailbox", "邮件") + " 来信",
                         supermicro="待核实",
                         products=[],
                         stage="ready",
@@ -217,7 +217,7 @@ class Store:
                         observedAt=item["updated_at"],
                         classificationVerified=False,
                         sourceType="sales_inbound",
-                        sourceMailbox="sales@glocalstorage.com",
+                        sourceMailbox=item.get("mailbox", ""),
                         aimailThreadId=tid,
                     )
                     c.execute(
@@ -235,6 +235,13 @@ class Store:
                     ):
                         # Preserve the Leadsgen assignment behind its access grant.
                         continue
+                    if item.get("mailbox") and account.get("sourceMailbox") != item["mailbox"]:
+                        account["sourceMailbox"] = item["mailbox"]
+                        account["department"] = item["mailbox"] + " 来信"
+                        c.execute(
+                            "UPDATE account SET payload=? WHERE id=?",
+                            (json.dumps(account), row["id"]),
+                        )
                     previous = c.execute(
                         "SELECT version FROM account_assignment WHERE account_id=?", (row["id"],)
                     ).fetchone()

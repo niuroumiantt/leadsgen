@@ -408,6 +408,9 @@ def test_mail_handoff_projection_preserves_owner_and_blocks_double_assignment(tm
     store.import_mail_handoffs([item])
     store.import_mail_handoffs([item])
     assert len(store.accounts()) == 1
+    item["mailbox"] = "larry@example.com"
+    store.import_mail_handoffs([item])
+    assert store.accounts()[0]["sourceMailbox"] == "larry@example.com"
     assert len(store.assigned_accounts("isaac@example.com")) == 1
     assert not store.assigned_accounts("other@example.com")
     with pytest.raises(ValueError):
