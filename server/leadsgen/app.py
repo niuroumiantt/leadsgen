@@ -189,7 +189,19 @@ def sync_confirmed_leads(store: Store, endpoint: str, token: str):
         or (next_since == since and next_after < after)
     ):
         raise ValueError("invalid_confirmed_mail_leads")
-    store.import_confirmed_leads(items, next_since, next_after)
+    # The feed also serves the primary mailbox. Only shared sales intake belongs
+    # in the unassigned pool; personal threads enter through explicit handoffs.
+    if any(
+        not isinstance(item, dict)
+        or not isinstance(item.get("source"), dict)
+        or not isinstance(item["source"].get("mailbox"), str)
+        for item in items
+    ):
+        raise ValueError("invalid_confirmed_mail_leads")
+    sales_items = [
+        item for item in items if item["source"]["mailbox"].casefold() == "sales@glocalstorage.com"
+    ]
+    store.import_confirmed_leads(sales_items, next_since, next_after)
 
 
 def send_assignment_notices(store: Store, endpoint: str, token: str):

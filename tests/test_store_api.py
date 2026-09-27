@@ -581,3 +581,45 @@ def test_projected_decision_checks_identity_and_refreshes_source(tmp_path, monke
             == 403
         )
         assert len(calls) == 1
+
+
+def test_confirmed_feed_skips_personal_mail_and_advances_mixed_page_cursor(tmp_path, monkeypatch):
+    from leadsgen.app import sync_confirmed_leads
+
+    store = Store(tmp_path / "app.sqlite3")
+    items = [
+        {
+            "version": "lead@1",
+            "id": "1",
+            "source": {"mailbox": "larry@glocalstorage.com", "thread_id": "101"},
+        },
+        {
+            "version": "lead@1",
+            "id": "2",
+            "source": {"mailbox": "sales@glocalstorage.com", "thread_id": "102"},
+        },
+    ]
+    payload = {
+        "version": "v1",
+        "leads": items,
+        "next_since": "2026-09-27T10:00:00Z",
+        "next_after": 2,
+    }
+    monkeypatch.setattr(
+        httpx,
+        "get",
+        lambda *a, **kw: httpx.Response(
+            200, json=payload, request=httpx.Request("GET", "https://mail.test/v1/leads")
+        ),
+    )
+    sync_confirmed_leads(store, "https://mail.test", "test-token")
+    assert [a["aimailThreadId"] for a in store.accounts()] == ["102"]
+    assert store.confirmed_lead_cursor() == (payload["next_since"], 2)
+    payload.update(leads=[items[0]], next_after=3)
+    sync_confirmed_leads(store, "https://mail.test", "test-token")
+    assert len(store.accounts()) == 1
+    assert store.confirmed_lead_cursor() == (payload["next_since"], 3)
+    payload.update(leads=[{"source": None}], next_after=4)
+    with pytest.raises(ValueError, match="invalid_confirmed_mail_leads"):
+        sync_confirmed_leads(store, "https://mail.test", "test-token")
+    assert store.confirmed_lead_cursor() == (payload["next_since"], 3)
