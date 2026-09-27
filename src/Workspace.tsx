@@ -4,11 +4,16 @@ import {
   App,
   Button,
   Card,
+  Collapse,
+  Timeline,
+  Avatar,
   Dropdown,
   Descriptions,
   Drawer,
   Empty,
   Form,
+  Grid,
+  Pagination,
   Input,
   Layout,
   Menu,
@@ -132,6 +137,8 @@ export default function Workspace() {
   const [sourceFilter, setSourceFilter] = useState<string>();
   const [returnReason, setReturnReason] = useState("");
   const [query, setQuery] = useState("");
+  const screens = Grid.useBreakpoint();
+  const [compactPage, setCompactPage] = useState(1);
   const [region, setRegion] = useState<string>();
   const [country, setCountry] = useState<string>();
   const [industry, setIndustry] = useState<string>();
@@ -378,7 +385,7 @@ export default function Workspace() {
   };
 
   return (
-    <Layout className="app-shell">
+    <Layout className="app-shell pipeline-workspace">
       <Layout.Sider width={218} theme="light" className="sidebar">
         <div className="brand">
           <div className="brand-mark">
@@ -478,11 +485,11 @@ export default function Workspace() {
           <div className="page-heading">
             <div>
               <div className="eyebrow">
-                PUBLIC CONTACTS. REAL OPPORTUNITIES.
+                LEAD MANAGEMENT
               </div>
               <Title level={2}>
                 {page === "accounts"
-                  ? isAdmin ? "每条线索，明确负责人和下一步。" : "处理分配给我的客户线索。"
+                  ? isAdmin ? "线索总览" : "我的线索"
                   : page === "jobs"
                     ? "每一次采集都有结果和出处。"
                     : "首封之后，按计划继续联系。"}
@@ -517,12 +524,14 @@ export default function Workspace() {
                 ]).map((m) => (
                   <Card key={m.label} className="metric-card">
                     <Text type="secondary">{m.label}</Text>
-                    <Title level={2}>{m.value}</Title>
+                    <div className="pipeline-metric-value">{m.value}</div>
                   </Card>
                 ))}
               </div>
               <div className="accounts-panel">
-                <div className="filters">
+                <div className="pipeline-toolbar">
+                  <div className="pipeline-status-tabs" role="group" aria-label="常用线索视图">{[{value:undefined,label:"全部线索"},{value:"pending",label:"待接手"},{value:"accepted",label:"已接受"},{value:"returned",label:"已退回"},{value:"overdue",label:"跟进逾期"}].map(item=><Button key={item.label} type={statusFilter===item.value?"primary":"text"} onClick={()=>setStatusFilter(item.value)}>{item.label}</Button>)}</div>
+                  <div className="pipeline-filter-row">
                   <Input
                     className="search-input"
                     prefix={<SearchOutlined />}
@@ -533,7 +542,13 @@ export default function Workspace() {
                       setSelection([]);
                     }}
                   />
-                  <Select
+                <div className="pipeline-primary-filters">
+                  {isAdmin && <Select aria-label="按跟进员工筛选" placeholder="全部员工" allowClear style={{minWidth:240}} value={ownerFilter} onChange={setOwnerFilter} options={(state?.members ?? []).map(value=>({value,label:value}))} />}
+                  <Select aria-label="按交接状态筛选" placeholder="全部交接状态" allowClear style={{minWidth:180}} value={statusFilter} onChange={setStatusFilter} options={[{value:"unassigned",label:"待分配"},{value:"pending",label:"待接手"},{value:"accepted",label:"已接受"},{value:"returned",label:"已退回"},{value:"overdue",label:"跟进逾期"}]} />
+                  <Select aria-label="按来源筛选" placeholder="全部来源" allowClear style={{minWidth:180}} value={sourceFilter} onChange={setSourceFilter} options={[{value:"sales_inbound",label:"邮件来信"},{value:"discovery",label:"主动开发"}]} />
+                </div>
+                  </div>
+                  <Collapse ghost size="small" items={[{key:"advanced",label:"更多筛选：区域、行业、国家与客户分层",children:<div className="pipeline-advanced-filters">                  <Select
                     allowClear
                     placeholder="全部区域"
                     value={region}
@@ -581,12 +596,8 @@ export default function Workspace() {
                       { label: "Tier 2", value: "2" },
                     ]}
                   />
+</div>}]} />
                 </div>
-                <Space wrap style={{marginBottom:16}}>
-                  {isAdmin && <Select aria-label="按跟进员工筛选" placeholder="全部员工" allowClear style={{minWidth:240}} value={ownerFilter} onChange={setOwnerFilter} options={(state?.members ?? []).map(value=>({value,label:value}))} />}
-                  <Select aria-label="按交接状态筛选" placeholder="全部交接状态" allowClear style={{minWidth:180}} value={statusFilter} onChange={setStatusFilter} options={[{value:"unassigned",label:"待分配"},{value:"pending",label:"待接手"},{value:"accepted",label:"已接受"},{value:"returned",label:"已退回"},{value:"overdue",label:"跟进逾期"}]} />
-                  <Select aria-label="按来源筛选" placeholder="全部来源" allowClear style={{minWidth:180}} value={sourceFilter} onChange={setSourceFilter} options={[{value:"sales_inbound",label:"邮件来信"},{value:"discovery",label:"主动开发"}]} />
-                </Space>
                 <div className="table-toolbar">
                   <Text type="secondary">
                     {filtered.length} 条线索 · {isAdmin ? "管理员全局视图" : "仅本人负责或待本人接手"}
@@ -599,11 +610,20 @@ export default function Workspace() {
                     交接名单 ({selected.length})
                   </Button>}
                 </div>
-                <Table
+                {!screens.lg ? <div className="pipeline-compact-list">
+                  {!state && !error ? <Card loading /> : !filtered.length ? <Empty description={isAdmin ? "没有符合筛选条件的线索" : "暂时没有分配给你的线索"} /> : filtered.slice((Math.min(compactPage,Math.ceil(filtered.length/12))-1)*12,Math.min(compactPage,Math.ceil(filtered.length/12))*12).map(a=><article className="pipeline-lead-card" key={a.id}>
+                    <div className="pipeline-lead-card-heading"><Avatar>{a.name.slice(0,1)}</Avatar><div><h3>{a.name}</h3><p>{a.sourceType === "sales_inbound" ? (a.sourceMailbox || "邮件来信") : a.domain}</p></div><Button type="link" onClick={()=>openDetail(a)}>详情</Button></div>
+                    <div className="pipeline-lead-card-state"><Tag color={a.assignment.pending ? "orange" : a.assignment.status === "returned" ? "red" : a.assignment.owner ? "green" : "default"}>{a.assignment.status === "returned" ? "已退回" : a.assignment.pending ? "待接手" : a.assignment.owner ? "已接受" : "待分配"}</Tag><span>{a.assignment.pending ? `待 ${a.assignment.pending} 接手` : `负责人：${a.assignment.owner || "未分配"}`}</span></div>
+                    <div className="pipeline-lead-card-next"><span>{a.followup?.stage || "尚未开始"}</span><strong>{a.followup?.next_step || "未填写下一步"}</strong>{a.followup?.due_at&&<Tag color={a.followup.due_at < new Date().toLocaleDateString("sv-SE") && a.followup.stage !== "结束" ? "red" : "blue"}>{a.followup.due_at}</Tag>}</div>
+                    {isAdmin && a.stage === "ready" && a.sourceType !== "sales_inbound" && <Button size="small" onClick={()=>setSelection(current=>current.includes(a.id)?current.filter(id=>id!==a.id):[...current,a.id])}>{selection.includes(a.id)?"从交接名单移除":"加入交接名单"}</Button>}
+                  </article>)}
+                  {filtered.length>12&&<Pagination current={Math.min(compactPage,Math.ceil(filtered.length/12))} pageSize={12} total={filtered.length} showSizeChanger={false} onChange={setCompactPage}/>}
+                </div> : <Table
+                  className="account-table pipeline-table"
                   rowKey="id"
                   dataSource={filtered}
                   loading={!state && !error}
-                  scroll={{ x: 1600 }}
+                  scroll={{ x: 1320 }}
                   pagination={{ pageSize: 12, showSizeChanger: false }}
                   rowSelection={isAdmin ? {
                     selectedRowKeys: selection,
@@ -619,10 +639,11 @@ export default function Workspace() {
                   }}
                   columns={[
                     {
-                      title: "公司 / 官网",
-                      width: 250,
+                      title: "客户 / 来源",
+                      width: 260,
+                      fixed: "left",
                       render: (_, a) => (
-                        <>
+                        <div className="pipeline-customer-cell"><Avatar className="company-avatar">{a.name.slice(0,1)}</Avatar><div>
                           <Button
                             type="link"
                             className="company-link"
@@ -631,12 +652,13 @@ export default function Workspace() {
                             {a.name}
                           </Button>
                           <div className="secondary mono">{a.sourceType === "sales_inbound" ? (a.sourceMailbox || "邮件来信") : a.domain}</div>
-                        </>
+                        </div></div>
                       ),
                     },
                     {
                       title: "国家 / 行业",
-                      width: 180,
+                      width: 140,
+                      responsive: ["xl"],
                       render: (_, a) => (
                         <>
                           {a.country}
@@ -646,12 +668,13 @@ export default function Workspace() {
                     },
                     {
                       title: "分层",
-                      width: 100,
+                      width: 90,
+                      responsive: ["xxl"],
                       render: (_, a) => <Tag color="blue">Tier {a.tier}</Tag>,
                     },
                     {
-                      title: "公开邮箱",
-                      width: 290,
+                      title: "联系人 / 邮箱",
+                      width: 230,
                       render: (_, a) => (
                         <>
                           <Text className="mono">{a.email || "待核实"}</Text>
@@ -661,7 +684,8 @@ export default function Workspace() {
                     },
                     {
                       title: "档案状态",
-                      width: 100,
+                      width: 110,
+                      responsive: ["xxl"],
                       render: (_, a) => (
                         <Tag color={stageInfo[a.stage].color}>
                           {stageInfo[a.stage].label}
@@ -670,11 +694,11 @@ export default function Workspace() {
                     },
                     {
                       title: "负责人 / 接手状态",
-                      width: 180,
+                      width: 250,
                       render: (_, a) => (
                         <>
                           <div>{a.assignment?.pending ? `待 ${a.assignment.pending} 接手` : a.assignment?.owner || "未分配"}</div>
-                          <Tag color={a.assignment.pending ? "orange" : a.assignment.status === "returned" ? "red" : "green"}>{a.assignment.status === "returned" ? "已退回" : a.assignment.pending ? "Pending · 待接手" : a.assignment.owner ? "已接受" : "待分配"}</Tag>
+                          <Tag color={a.assignment.pending ? "orange" : a.assignment.status === "returned" ? "red" : "green"}>{a.assignment.status === "returned" ? "已退回" : a.assignment.pending ? "待接手" : a.assignment.owner ? "已接受" : "待分配"}</Tag>
                           <div className="secondary small">通知：{{queued:"排队中",sent:"邮件服务已接受",unknown:"发送结果待核对",cancelled:"已取消",not_requested:"未发送"}[a.assignment.notification?.state || "not_requested"]}</div>
                           <div className="secondary small">{a.assignment.updated_at ? new Date(a.assignment.updated_at).toLocaleString() : ""}</div>
                         </>
@@ -687,6 +711,8 @@ export default function Workspace() {
                     },
                     {
                       title: "操作",
+                      width: 80,
+                      fixed: "right",
                       render: (_, a) => (
                         <Button type="link" onClick={() => openDetail(a)}>
                           详情
@@ -694,7 +720,7 @@ export default function Workspace() {
                       ),
                     },
                   ]}
-                />
+                />}
               </div>
             </>
           )}
@@ -828,13 +854,15 @@ export default function Workspace() {
         open={!!detail}
         extra={!isAdmin && detail?.assignment.pending === state?.identity ? <Space><Button type="primary" loading={saving} onClick={()=>void decideAssignment(true)}>接受</Button><Button loading={saving} onClick={promptReturn}>退回</Button></Space> : undefined}
         onClose={() => setDetail(undefined)}
-        title="客户档案 · 真实采集"
-        size={650}
+        title="客户线索详情"
+        className="pipeline-detail-drawer"
+        size={800}
+        styles={{wrapper:{maxWidth:"100vw"}}}
       >
         {detail && (
           <>
-            <Title level={3}>{detail.name}</Title>
-            <Paragraph>{detail.summary}</Paragraph>
+            <div className="pipeline-detail-heading"><Avatar size={48}>{detail.name.slice(0,1)}</Avatar><div><Space wrap><Tag color="blue">{detail.sourceType==="sales_inbound"?"邮件来信":"主动开发"}</Tag><Tag color={detail.assignment.pending?"gold":detail.assignment.status==="returned"?"red":"green"}>{detail.assignment.pending?"待接手":detail.assignment.status==="returned"?"已退回":detail.assignment.owner?"已接受":"待分配"}</Tag></Space><Title level={3}>{detail.name}</Title><Text type="secondary">{detail.assignment.pending?`待 ${detail.assignment.pending} 接手`:`负责人：${detail.assignment.owner||"未分配"}`}</Text></div></div>
+            <Card className="pipeline-detail-summary" title="线索摘要"><Paragraph>{detail.summary||"客户背景待进一步确认"}</Paragraph>{detail.followup&&<div className="pipeline-next-step"><Tag color="blue">{detail.followup.stage}</Tag><strong>{detail.followup.next_step||"尚未填写下一步"}</strong>{detail.followup.due_at&&<Text type="secondary">计划日期：{detail.followup.due_at}</Text>}</div>}</Card>
             <Descriptions
               bordered
               size="small"
@@ -848,11 +876,7 @@ export default function Workspace() {
                 {
                   key: "site",
                   label: "官网",
-                  children: (
-                    <a href={detail.website} target="_blank" rel="noreferrer">
-                      {detail.website}
-                    </a>
-                  ),
+                  children: detail.website ? <a href={detail.website} target="_blank" rel="noreferrer">{detail.website}</a> : "尚未核实",
                 },
                 {
                   key: "country",
@@ -875,13 +899,12 @@ export default function Workspace() {
             <DividerLine />
             <Title level={5}>公开联系方式与来源</Title>
                 {detail.sourceType === "sales_inbound" && <Card size="small" className="section-card" title="来信线索来源">
-                  <Paragraph>由 Aimail 人工确认并同步；邮件正文、附件和线程仍保存在 Aimail。</Paragraph>
+                  <Paragraph>来源邮箱：{detail.sourceMailbox || "邮件来信"}。原邮件和附件可在 Aimail 查看。</Paragraph>
                   {detail.aimailQuantity && <Paragraph>数量信息：{detail.aimailQuantity}</Paragraph>}
                   {(detail.assignmentAuthority === "aimail" || detail.assignment?.mail_access_status === "granted") && detail.aimailThreadId ? (
                     <a href={`https://mail.glocalstorage.cn/${isAdmin ? "t" : "followups"}/${detail.aimailThreadId}`} target="_blank" rel="noreferrer">打开 Aimail 中已授权的邮件线程 ↗</a>
                   ) : <Text type="secondary">{detail.assignment?.mail_access_error || "邮件线程权限同步中；完成后会出现安全链接。"}</Text>}
-                  <div><Text copyable>邮件线程 ID：{detail.aimailThreadId || "未提供"}</Text></div>
-                  <div><Text type="secondary">确认线索 ID：{detail.aimailLeadId}</Text></div>
+
                 </Card>}
                 {detail.sourceType !== "sales_inbound" && detail.contacts?.map((c) => (
               <Card size="small" key={c.email} className="section-card">
@@ -972,7 +995,7 @@ export default function Workspace() {
               ) : <Text type="secondary">这条线索尚未分配给你。</Text>}
             </Card>
             <Card className="section-card" title="交接记录">
-              {(detail.assignment.history ?? []).length ? detail.assignment.history!.map(event=><div key={event.version} style={{padding:"12px 0",borderBottom:"1px solid #eee"}}><strong>{{offered:"发起分配",accepted:"确认接手",declined:"退回",cancelled:"撤回"}[event.action] || event.action}</strong> · {event.recipient}<div>{event.actor} · {new Date(event.created_at).toLocaleString()}</div>{event.reason && <Paragraph>原因：{event.reason}</Paragraph>}</div>) : <Text type="secondary">暂无新交接记录</Text>}
+              {(detail.assignment.history ?? []).length ? <Timeline items={detail.assignment.history!.map(event=>({key:event.version,children:<div><strong>{{offered:"发起分配",accepted:"确认接手",declined:"退回",cancelled:"撤回"}[event.action] || event.action}</strong><div className="pipeline-history-person">{event.recipient||event.actor}</div><Text type="secondary">{event.actor} · {new Date(event.created_at).toLocaleString()}</Text>{event.reason && <Paragraph>原因：{event.reason}</Paragraph>}</div>}))} /> : <Text type="secondary">暂无新交接记录</Text>}
             </Card>
             <Alert
               className="section-card"
