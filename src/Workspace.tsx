@@ -53,6 +53,7 @@ type LiveAccount = Account & {
   sourceType?: "sales_inbound" | "discovery";
   sourceMailbox?: string;
   aimailLeadId?: string;
+  assignmentAuthority?: "aimail";
   aimailThreadId?: string;
   aimailContact?: string;
   aimailQuantity?: string;
@@ -60,6 +61,10 @@ type LiveAccount = Account & {
     owner: string;
     pending: string;
     version: number;
+    status?: string;
+    notification?: {state:string; last_error:string};
+    updated_at?: string;
+    history?: {actor:string; action:string; recipient:string; reason:string; version:number; created_at:string}[];
     mail_access_status?: string;
     mail_access_error?: string;
   };
@@ -122,6 +127,10 @@ export default function Workspace() {
   const [state, setState] = useState<State>();
   const [error, setError] = useState("");
   const [page, setPage] = useState("accounts");
+  const [ownerFilter, setOwnerFilter] = useState<string>();
+  const [statusFilter, setStatusFilter] = useState<string>();
+  const [sourceFilter, setSourceFilter] = useState<string>();
+  const [returnReason, setReturnReason] = useState("");
   const [query, setQuery] = useState("");
   const [region, setRegion] = useState<string>();
   const [country, setCountry] = useState<string>();
@@ -150,10 +159,25 @@ export default function Workspace() {
     const timer = setInterval(() => void refresh(), 5000);
     return () => clearInterval(timer);
   }, [refresh]);
+  useEffect(() => {
+    if (!state) return;
+    const requested = new URLSearchParams(window.location.search).get("lead");
+    if (!requested) setDetail(current=>current ? state.accounts.find(a=>a.id===current.id) : undefined);
+    if (requested) {
+      const target = state.accounts.find(account=>account.id === requested);
+      if (target) {
+        setDetail(target); setNextStep(target.followup?.next_step ?? "");
+        setDueAt(target.followup?.due_at ?? ""); setFollowupStage(target.followup?.stage ?? "待联系");
+      }
+      else message.info("这条线索已撤回或不属于当前账号，请联系管理员。");
+      window.history.replaceState(null, "", window.location.pathname);
+    }
+  }, [state, message]);
   const data = state?.accounts ?? [];
   const isAdmin = state?.role === "admin";
   const openDetail = (account: LiveAccount) => {
     setDetail(account);
+    setReturnReason("");
     setNextStep(account.followup?.next_step ?? "");
     setDueAt(account.followup?.due_at ?? "");
     setFollowupStage(account.followup?.stage ?? "待联系");
@@ -165,6 +189,9 @@ export default function Workspace() {
           `${a.name} ${a.domain} ${a.email}`
             .toLowerCase()
             .includes(query.toLowerCase())) &&
+        (!ownerFilter || a.assignment.owner === ownerFilter || a.assignment.pending === ownerFilter) &&
+        (!statusFilter || (statusFilter === "overdue" ? !!a.followup?.due_at && a.followup.due_at < new Date().toLocaleDateString("sv-SE") && a.followup.stage !== "结束" : a.assignment.status === statusFilter)) &&
+        (!sourceFilter || (a.sourceType || "discovery") === sourceFilter) &&
         (!region || a.region === region) &&
         (!country || a.country === country) &&
         (!industry || a.industry === industry) &&
@@ -227,29 +254,46 @@ export default function Workspace() {
       setAssignee("");
       setDetail(undefined);
       await refresh();
-      message.success("已发送线索接手邀请；员工接受后成为负责人。");
+      message.success("已记录分配，通知进入发送队列；送达情况请查看通知状态。");
     } catch (e) {
       message.error((e as Error).message);
     } finally {
       setSaving(false);
     }
   };
-  const decideAssignment = async (accept: boolean) => {
-    if (!detail) return;
+  const decideAssignment = async (accept: boolean, reason = returnReason) => {
+    if (!detail) return false;
     setSaving(true);
     try {
       await api(
         `/api/accounts/${detail.id}/assignment/${accept ? "accept" : "decline"}`,
-        { version: detail.assignment.version },
+        { version: detail.assignment.version, ...(!accept ? {reason} : {}) },
       );
       setDetail(undefined);
       await refresh();
       message.success(accept ? "已接手这条线索。" : "已退回这条线索。管理员可重新分配。");
+      return true;
     } catch (e) {
       message.error((e as Error).message);
     } finally {
       setSaving(false);
     }
+  };
+  const promptReturn = () => {
+    let reason = "";
+    modal.confirm({title:"退回线索", content:<Input.TextArea aria-label="退回原因" placeholder="请填写退回原因" maxLength={1000} onChange={e=>{reason=e.target.value;}} />,
+      okText:"确认退回", cancelText:"取消", onOk:async()=>{
+        if (!reason.trim()) {message.error("请填写退回原因"); throw new Error("reason required");}
+        if (!await decideAssignment(false, reason)) throw new Error("decision failed");
+      }});
+  };
+  const cancelAssignment = async () => {
+    if (!detail) return;
+    setSaving(true);
+    try {
+      await api(`/api/accounts/${detail.id}/assignment/cancel`, {version: detail.assignment.version});
+      setDetail(undefined); await refresh(); message.success("已撤回待接手交接。");
+    } catch(e) {message.error((e as Error).message);} finally {setSaving(false);}
   };
   const saveFollowup = async () => {
     if (!detail) return;
@@ -438,13 +482,13 @@ export default function Workspace() {
               </div>
               <Title level={2}>
                 {page === "accounts"
-                  ? isAdmin ? "统一初筛主动发现与客户来信。" : "处理分配给我的客户线索。"
+                  ? isAdmin ? "每条线索，明确负责人和下一步。" : "处理分配给我的客户线索。"
                   : page === "jobs"
                     ? "每一次采集都有结果和出处。"
                     : "首封之后，按计划继续联系。"}
               </Title>
               <Paragraph className="page-subtitle">
-                终端用户、机房租赁商、集成商与贸易商均纳入。邮箱用途是标签，不是排除理由。
+                {isAdmin ? "统一查看主动开发与客户来信，追踪分配、接手和跟进进展。" : "查看交接摘要，接受或退回线索，并记录下一步行动。"}
               </Paragraph>
             </div>
             {isAdmin && <Button
@@ -460,8 +504,8 @@ export default function Workspace() {
               <div className="metrics">
                 {(isAdmin ? [
                   { label: "全部线索", value: data.length },
-                  { label: "主动发现", value: data.filter((a) => a.sourceType !== "sales_inbound").length },
-                  { label: "sales 来信", value: data.filter((a) => a.sourceType === "sales_inbound").length },
+                  { label: "待接手", value: data.filter((a) => !!a.assignment.pending).length },
+                  { label: "已退回", value: data.filter((a) => a.assignment.status === "returned").length },
                   {
                     label: "待分配", value: data.filter((a) => !a.assignment?.owner && !a.assignment?.pending).length,
                   },
@@ -538,6 +582,11 @@ export default function Workspace() {
                     ]}
                   />
                 </div>
+                <Space wrap style={{marginBottom:16}}>
+                  {isAdmin && <Select aria-label="按跟进员工筛选" placeholder="全部员工" allowClear style={{minWidth:240}} value={ownerFilter} onChange={setOwnerFilter} options={(state?.members ?? []).map(value=>({value,label:value}))} />}
+                  <Select aria-label="按交接状态筛选" placeholder="全部交接状态" allowClear style={{minWidth:180}} value={statusFilter} onChange={setStatusFilter} options={[{value:"unassigned",label:"待分配"},{value:"pending",label:"待接手"},{value:"accepted",label:"已接受"},{value:"returned",label:"已退回"},{value:"overdue",label:"跟进逾期"}]} />
+                  <Select aria-label="按来源筛选" placeholder="全部来源" allowClear style={{minWidth:180}} value={sourceFilter} onChange={setSourceFilter} options={[{value:"sales_inbound",label:"sales@ 来信"},{value:"discovery",label:"主动开发"}]} />
+                </Space>
                 <div className="table-toolbar">
                   <Text type="secondary">
                     {filtered.length} 条线索 · {isAdmin ? "管理员全局视图" : "仅本人负责或待本人接手"}
@@ -554,7 +603,7 @@ export default function Workspace() {
                   rowKey="id"
                   dataSource={filtered}
                   loading={!state && !error}
-                  scroll={{ x: 1100 }}
+                  scroll={{ x: 1600 }}
                   pagination={{ pageSize: 12, showSizeChanger: false }}
                   rowSelection={isAdmin ? {
                     selectedRowKeys: selection,
@@ -565,7 +614,7 @@ export default function Workspace() {
                   } : undefined}
                   locale={{
                     emptyText: (
-                      <Empty description="尚未建档。添加官网种子，开始第一批真实采集。" />
+                      <Empty description={isAdmin ? "没有符合筛选条件的线索" : "暂时没有分配给你的线索"} />
                     ),
                   }}
                   columns={[
@@ -620,14 +669,21 @@ export default function Workspace() {
                       ),
                     },
                     {
-                      title: "负责人 / 阶段",
+                      title: "负责人 / 接手状态",
                       width: 180,
                       render: (_, a) => (
                         <>
                           <div>{a.assignment?.pending ? `待 ${a.assignment.pending} 接手` : a.assignment?.owner || "未分配"}</div>
-                          <div className="secondary small">{a.followup?.stage || "初筛 / 待分配"}</div>
+                          <Tag color={a.assignment.pending ? "orange" : a.assignment.status === "returned" ? "red" : "green"}>{a.assignment.status === "returned" ? "已退回" : a.assignment.pending ? "Pending · 待接手" : a.assignment.owner ? "已接受" : "待分配"}</Tag>
+                          <div className="secondary small">通知：{{queued:"排队中",sent:"邮件服务已接受",unknown:"发送结果待核对",cancelled:"已取消",not_requested:"未发送"}[a.assignment.notification?.state || "not_requested"]}</div>
+                          <div className="secondary small">{a.assignment.updated_at ? new Date(a.assignment.updated_at).toLocaleString() : ""}</div>
                         </>
                       ),
+                    },
+                    {
+                      title: "跟进进展 / 下一步",
+                      width: 260,
+                      render: (_, a) => <><div>{a.followup?.stage || "尚未开始"}</div><div>{a.followup?.next_step || "未填写下一步"}</div>{a.followup?.due_at && <Tag color={a.followup.due_at < new Date().toLocaleDateString("sv-SE") && a.followup.stage !== "结束" ? "red" : "blue"}>{a.followup.due_at}</Tag>}</>,
                     },
                     {
                       title: "操作",
@@ -770,6 +826,7 @@ export default function Workspace() {
       </Layout>
       <Drawer
         open={!!detail}
+        extra={!isAdmin && detail?.assignment.pending === state?.identity ? <Space><Button type="primary" loading={saving} onClick={()=>void decideAssignment(true)}>接受</Button><Button loading={saving} onClick={promptReturn}>退回</Button></Space> : undefined}
         onClose={() => setDetail(undefined)}
         title="客户档案 · 真实采集"
         size={650}
@@ -820,7 +877,7 @@ export default function Workspace() {
                 {detail.sourceType === "sales_inbound" && <Card size="small" className="section-card" title="来信线索来源">
                   <Paragraph>由 Aimail 人工确认并同步；邮件正文、附件和线程仍保存在 Aimail。</Paragraph>
                   {detail.aimailQuantity && <Paragraph>数量信息：{detail.aimailQuantity}</Paragraph>}
-                  {detail.assignment?.mail_access_status === "granted" && detail.aimailThreadId ? (
+                  {(detail.assignmentAuthority === "aimail" || detail.assignment?.mail_access_status === "granted") && detail.aimailThreadId ? (
                     <a href={`https://mail.glocalstorage.cn/followups/${detail.aimailThreadId}`} target="_blank" rel="noreferrer">打开 Aimail 中已授权的邮件线程 ↗</a>
                   ) : <Text type="secondary">{detail.assignment?.mail_access_error || "邮件线程权限同步中；完成后会出现安全链接。"}</Text>}
                   <div><Text copyable>邮件线程 ID：{detail.aimailThreadId || "未提供"}</Text></div>
@@ -868,7 +925,13 @@ export default function Workspace() {
               </Card>
             ))}
             <Card className="section-card" title={isAdmin ? "负责人分配" : "我的跟进"}>
-              {isAdmin ? (
+              {isAdmin && detail.assignment.notification?.last_error && <Alert type="warning" showIcon title="通知尚未确认发送" description={detail.assignment.notification.last_error} style={{marginBottom:16}} />}
+              {isAdmin && detail.assignment.notification?.state === "unknown" && <Alert type="warning" showIcon title="发送结果待核对" description="请核对管理员发件记录。系统不会自动重复发送这封通知，分配仍保持待接手。" style={{marginBottom:16}} />}
+              {detail.assignmentAuthority === "aimail" && isAdmin ? (
+                <><Paragraph>当前负责人：{detail.assignment.owner || "未分配"}；待接手：{detail.assignment.pending || "无"}</Paragraph>
+                <Button type="primary" href={`https://mail.glocalstorage.cn/followups/${detail.aimailThreadId}`}>查看原邮件交接</Button>
+                <Paragraph type="secondary">已有邮件交接的负责人和接手结果自动同步，无需重复接手。</Paragraph></>
+              ) : isAdmin ? (
                 <>
                   <Paragraph>当前负责人：{detail.assignment?.owner || "未分配"}；待接手：{detail.assignment?.pending || "无"}</Paragraph>
                   <Space.Compact block>
@@ -883,11 +946,14 @@ export default function Workspace() {
                       提交交接
                     </Button>
                   </Space.Compact>
+                  {detail.assignment.pending && <Button style={{marginTop:12}} loading={saving} onClick={()=>void cancelAssignment()}>撤回本次交接</Button>}
+                  <Paragraph type="secondary">{detail.followup ? `${detail.followup.stage} · ${detail.followup.next_step || "未填写下一步"} · ${detail.followup.due_at || "未设置日期"}` : "尚未填写跟进计划"}</Paragraph>
                 </>
               ) : detail.assignment?.pending === state?.identity ? (
-                <Space>
+                <Space direction="vertical" style={{width:"100%"}}>
                   <Button type="primary" loading={saving} onClick={() => void decideAssignment(true)}>接受线索</Button>
-                  <Button loading={saving} onClick={() => void decideAssignment(false)}>退回管理员</Button>
+                  <Input.TextArea aria-label="退回原因" value={returnReason} onChange={e=>setReturnReason(e.target.value)} placeholder="退回时请说明原因，管理员可据此重新分配" maxLength={1000} />
+                  <Button disabled={!returnReason.trim()} loading={saving} onClick={() => void decideAssignment(false)}>退回管理员</Button>
                 </Space>
               ) : detail.assignment?.owner === state?.identity ? (
                 <Space direction="vertical" style={{ width: "100%" }}>
@@ -900,10 +966,13 @@ export default function Workspace() {
                   {detail.followup?.next_step && <Text type="secondary">上次下一步：{detail.followup.next_step}</Text>}
                   {detail.followup?.due_at && <Text type="secondary">计划时间：{detail.followup.due_at}</Text>}
                   <Input value={nextStep} onChange={(e) => setNextStep(e.target.value)} placeholder="下一步要做什么" maxLength={500} />
-                  <Input value={dueAt} onChange={(e) => setDueAt(e.target.value)} placeholder="下次跟进时间，例如 2026-10-01" maxLength={40} />
+                  <Input value={dueAt} onChange={(e) => setDueAt(e.target.value)} type="date" aria-label="下次跟进日期" maxLength={40} />
                   <Button type="primary" loading={saving} onClick={() => void saveFollowup()}>保存跟进计划</Button>
                 </Space>
               ) : <Text type="secondary">这条线索尚未分配给你。</Text>}
+            </Card>
+            <Card className="section-card" title="交接记录">
+              {(detail.assignment.history ?? []).length ? detail.assignment.history!.map(event=><div key={event.version} style={{padding:"12px 0",borderBottom:"1px solid #eee"}}><strong>{{offered:"发起分配",accepted:"确认接手",declined:"退回",cancelled:"撤回"}[event.action] || event.action}</strong> · {event.recipient}<div>{event.actor} · {new Date(event.created_at).toLocaleString()}</div>{event.reason && <Paragraph>原因：{event.reason}</Paragraph>}</div>) : <Text type="secondary">暂无新交接记录</Text>}
             </Card>
             <Alert
               className="section-card"
