@@ -1,6 +1,7 @@
 import httpx
+import pytest
 from fastapi.testclient import TestClient
-from leadsgen.app import create_app, deliver_one
+from leadsgen.app import create_app, deliver_one, sync_followup_access
 from leadsgen.store import Store
 
 
@@ -49,6 +50,128 @@ def test_no_endpoint_never_marks_delivered(tmp_path):
     assert store.handoffs()[0]["status"] == "queued"
 
 
+def test_confirmed_sales_inquiry_import_is_idempotent_and_never_becomes_outreach(tmp_path):
+    store = Store(tmp_path / "app.sqlite3")
+    imported = store.import_confirmed_leads(
+        [
+            {
+                "version": "lead@1",
+                "id": "42",
+                "status": "quote",
+                "company": "Example Buyer",
+                "contact": "Alex",
+                "email": "alex@example.net",
+                "wants": "Asked about memory modules",
+                "quantity": "20",
+                "region": "美国",
+                "confirmed_at": "2026-09-27T00:00:00Z",
+                "source": {
+                    "mailbox": "sales@glocalstorage.com",
+                    "thread_id": "991",
+                    "subject": "Inquiry",
+                },
+            }
+        ],
+        "2026-09-27T00:00:00Z",
+        42,
+    )
+    assert imported == 1
+    account = store.accounts()[0]
+    assert account["sourceType"] == "sales_inbound"
+    assert account["aimailThreadId"] == "991"
+    assert account["email"] == "alex@example.net"
+    assert (
+        store.import_confirmed_leads(
+            [
+                {
+                    "version": "lead@1",
+                    "id": "42",
+                    "source": {"mailbox": "sales@glocalstorage.com"},
+                }
+            ],
+            "2026-09-27T00:00:00Z",
+            42,
+        )
+        == 0
+    )
+    assert len(store.accounts()) == 1
+    assert store.enqueue([account["id"]], "admin") == {"queued": [], "skipped": [account["id"]]}
+    assert store.assign(account["id"], "isaac@example.com", "admin", 0) == {
+        "owner": "",
+        "pending": "isaac@example.com",
+        "version": 1,
+    }
+    assert store.accept_assignment(account["id"], "isaac@example.com", 1)["owner"] == (
+        "isaac@example.com"
+    )
+    pending = store.pending_followup_grants()
+    assert pending == [
+        {
+            "account_id": account["id"],
+            "recipient": "isaac@example.com",
+            "thread_id": "991",
+            "attempts": 0,
+        }
+    ]
+    store.mark_followup_grant(account["id"], success=True, attempts=1)
+    assert store.accounts()[0]["assignment"]["mail_access_status"] == "granted"
+
+
+def test_followup_access_sync_posts_only_assigned_thread_and_checks_receipt(tmp_path, monkeypatch):
+    store = Store(tmp_path / "app.sqlite3")
+    store.import_confirmed_leads(
+        [
+            {
+                "version": "lead@1",
+                "id": "42",
+                "source": {"mailbox": "sales@glocalstorage.com", "thread_id": "991"},
+            }
+        ],
+        "",
+        42,
+    )
+    account_id = store.accounts()[0]["id"]
+    store.assign(account_id, "isaac@example.com", "admin", 0)
+    store.accept_assignment(account_id, "isaac@example.com", 1)
+    calls = []
+
+    def post(url, **kwargs):
+        calls.append((url, kwargs))
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", url),
+            json={
+                "external_id": account_id,
+                "thread_id": "991",
+                "owner": "isaac@example.com",
+                "version": 1,
+            },
+        )
+
+    monkeypatch.setattr("leadsgen.app.httpx.post", post)
+    sync_followup_access(store, "https://mail.example", "private-token")
+    assert len(calls) == 1
+    url, request = calls[0]
+    assert url == "https://mail.example/v1/followups/access"
+    assert request["json"] == {
+        "external_id": account_id,
+        "thread_id": 991,
+        "recipient": "isaac@example.com",
+    }
+    assert store.pending_followup_grants() == []
+    assert store.accounts()[0]["assignment"]["mail_access_status"] == "granted"
+
+
+def test_confirmed_lead_import_rejects_other_mailboxes(tmp_path):
+    store = Store(tmp_path / "app.sqlite3")
+    with pytest.raises(ValueError, match="invalid_confirmed_mail_lead"):
+        store.import_confirmed_leads(
+            [{"version": "lead@1", "id": "1", "source": {"mailbox": "isaac@semifly.ai"}}],
+            "",
+            0,
+        )
+
+
 def test_api_persists_jobs_and_requires_same_origin_custom_header(tmp_path):
     app = create_app(tmp_path / "app.sqlite3", worker_enabled=False)
     with TestClient(app) as client:
@@ -78,7 +201,12 @@ def test_api_persists_jobs_and_requires_same_origin_custom_header(tmp_path):
 
 
 def test_proxy_auth_requires_secret_and_identity(tmp_path):
-    app = create_app(tmp_path / "app.sqlite3", worker_enabled=False, proxy_key="a" * 40)
+    app = create_app(
+        tmp_path / "app.sqlite3",
+        worker_enabled=False,
+        proxy_key="a" * 40,
+        admin_users=("boss@example.com",),
+    )
     with TestClient(app) as client:
         assert client.get("/api/state", headers={"X-OA-User": "boss"}).status_code == 401
         assert (
@@ -86,10 +214,91 @@ def test_proxy_auth_requires_secret_and_identity(tmp_path):
         )
         assert (
             client.get(
-                "/api/state", headers={"X-Leadsgen-Proxy-Key": "a" * 40, "X-OA-User": "boss"}
+                "/api/state",
+                headers={
+                    "X-Leadsgen-Proxy-Key": "a" * 40,
+                    "X-OA-User": "boss",
+                    "X-OA-Email": "boss@example.com",
+                },
             ).status_code
             == 200
         )
+
+
+def test_lead_visibility_assignment_and_followup_are_server_enforced(tmp_path):
+    store, _ = seeded(tmp_path)
+    account_id = store.accounts()[0]["id"]
+    app = create_app(
+        tmp_path / "app.sqlite3",
+        worker_enabled=False,
+        proxy_key="p" * 40,
+        admin_users=("larry@example.com",),
+        sales_users=("isaac@example.com", "other@example.com"),
+    )
+    admin = {
+        "X-Leadsgen-Proxy-Key": "p" * 40,
+        "X-OA-User": "larry",
+        "X-OA-Email": "larry@example.com",
+        "X-Leadsgen-Client": "web-v1",
+    }
+    isaac = {
+        "X-Leadsgen-Proxy-Key": "p" * 40,
+        "X-OA-User": "isaac",
+        "X-OA-Email": "isaac@example.com",
+        "X-Leadsgen-Client": "web-v1",
+    }
+    other = {
+        "X-Leadsgen-Proxy-Key": "p" * 40,
+        "X-OA-User": "other",
+        "X-OA-Email": "other@example.com",
+        "X-Leadsgen-Client": "web-v1",
+    }
+    stranger = {
+        "X-Leadsgen-Proxy-Key": "p" * 40,
+        "X-OA-User": "stranger",
+        "X-OA-Email": "stranger@example.com",
+    }
+    with TestClient(app) as client:
+        assert client.get("/api/state", headers=stranger).status_code == 403
+        assert client.get("/api/state", headers=isaac).json()["accounts"] == []
+        offered = client.post(
+            f"/api/accounts/{account_id}/assignment",
+            headers=admin,
+            json={"recipient": "isaac@example.com", "version": 0},
+        )
+        assert offered.status_code == 200
+        assert (
+            client.post(
+                f"/api/accounts/{account_id}/assignment",
+                headers=isaac,
+                json={"recipient": "other@example.com", "version": 1},
+            ).status_code
+            == 403
+        )
+        assert [a["id"] for a in client.get("/api/state", headers=isaac).json()["accounts"]] == [
+            account_id
+        ]
+        assert client.get("/api/state", headers=other).json()["accounts"] == []
+        assert client.get("/api/state", headers=isaac).json()["jobs"] == []
+        accepted = client.post(
+            f"/api/accounts/{account_id}/assignment/accept", headers=isaac, json={"version": 1}
+        )
+        assert accepted.json() == {"owner": "isaac@example.com", "pending": "", "version": 2}
+        updated = client.post(
+            f"/api/accounts/{account_id}/followup",
+            headers=isaac,
+            json={"stage": "跟进中", "next_step": "核实需求", "due_at": "2026-10-01"},
+        )
+        assert updated.status_code == 200
+        assert (
+            client.post(
+                f"/api/accounts/{account_id}/followup",
+                headers=other,
+                json={"stage": "跟进中"},
+            ).status_code
+            == 403
+        )
+        assert client.post(f"/api/accounts/{account_id}/suppress", headers=isaac).status_code == 403
 
 
 def test_receipt_required_and_suppression_race_is_not_lost(tmp_path, monkeypatch):
