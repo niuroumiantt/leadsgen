@@ -585,7 +585,7 @@ export default function Workspace() {
                 <Space wrap style={{marginBottom:16}}>
                   {isAdmin && <Select aria-label="按跟进员工筛选" placeholder="全部员工" allowClear style={{minWidth:240}} value={ownerFilter} onChange={setOwnerFilter} options={(state?.members ?? []).map(value=>({value,label:value}))} />}
                   <Select aria-label="按交接状态筛选" placeholder="全部交接状态" allowClear style={{minWidth:180}} value={statusFilter} onChange={setStatusFilter} options={[{value:"unassigned",label:"待分配"},{value:"pending",label:"待接手"},{value:"accepted",label:"已接受"},{value:"returned",label:"已退回"},{value:"overdue",label:"跟进逾期"}]} />
-                  <Select aria-label="按来源筛选" placeholder="全部来源" allowClear style={{minWidth:180}} value={sourceFilter} onChange={setSourceFilter} options={[{value:"sales_inbound",label:"sales@ 来信"},{value:"discovery",label:"主动开发"}]} />
+                  <Select aria-label="按来源筛选" placeholder="全部来源" allowClear style={{minWidth:180}} value={sourceFilter} onChange={setSourceFilter} options={[{value:"sales_inbound",label:"邮件来信"},{value:"discovery",label:"主动开发"}]} />
                 </Space>
                 <div className="table-toolbar">
                   <Text type="secondary">
@@ -630,7 +630,7 @@ export default function Workspace() {
                           >
                             {a.name}
                           </Button>
-                          <div className="secondary mono">{a.sourceType === "sales_inbound" ? "sales@ 客户来信" : a.domain}</div>
+                          <div className="secondary mono">{a.sourceType === "sales_inbound" ? (a.sourceMailbox || "邮件来信") : a.domain}</div>
                         </>
                       ),
                     },
@@ -930,7 +930,7 @@ export default function Workspace() {
               {detail.assignmentAuthority === "aimail" && isAdmin ? (
                 <><Paragraph>当前负责人：{detail.assignment.owner || "未分配"}；待接手：{detail.assignment.pending || "无"}</Paragraph>
                 <Button type="primary" href={`https://mail.glocalstorage.cn/t/${detail.aimailThreadId}`}>查看共享邮箱原邮件</Button>
-                <Paragraph type="secondary">已有邮件交接的负责人和接手结果自动同步，无需重复接手。查看原邮件时请选择 sales@ 共享邮箱。</Paragraph></>
+                <Paragraph type="secondary">已有邮件交接的负责人和接手结果自动同步，无需重复接手。查看原邮件时请选择 {detail.sourceMailbox || "原收件邮箱"}。</Paragraph></>
               ) : isAdmin ? (
                 <>
                   <Paragraph>当前负责人：{detail.assignment?.owner || "未分配"}；待接手：{detail.assignment?.pending || "无"}</Paragraph>
