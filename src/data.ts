@@ -193,7 +193,7 @@ export const accounts: Account[] = [
     stage: "handed",
     mail: "replied",
     score: 91,
-    summary: "提供区域计算基础设施；示例中客户已回复，由 mail2leads 跟踪。",
+    summary: "提供区域计算基础设施；示例中客户已回复，由 Aimail 跟踪。",
     reason: "示例官网架构页含 Supermicro 使用证据。",
   },
   {

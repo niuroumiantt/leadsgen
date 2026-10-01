@@ -14,7 +14,8 @@ HTTP 访问默认真实数据；`?demo=1` 或离线 HTML 为 `.example` 合成�
 主动发现只使用公开来源；sales@ 只接收询盘。未经逐封明确批准，不会自动发送客户邮件。
 
 - [第一版系统设计](docs/design-v1.md)
-- [当前接线协议](docs/handoff-v2.md)
+- [开发信接线协议](docs/handoff-v2.md)
+- [跨仓库销售工作流与联合检查](https://github.com/niuroumiantt/infra/blob/main/docs/sales-workflow.md)
 - [v0.2 运行与发布说明](docs/release-v0.2.md)
 - 前端：React / TypeScript / Ant Design / Vite
 

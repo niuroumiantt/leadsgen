@@ -217,13 +217,13 @@ export default function Workspace() {
     if (!detail) return;
     modal.confirm({
       title: "确认这是该公司的公开业务联系入口？",
-      content: `${email}。用途标签不代表采购身份；交接后仍需在邮件系统确认发送内容。`,
+      content: `${email}。用途标签不代表采购身份；提交后仍需在邮件系统确认发送内容。`,
       onOk: async () => {
         try {
           await api(`/api/accounts/${detail.id}/contact`, { email });
           setDetail(undefined);
           await refresh();
-          message.success("联系邮箱已确认，可加入交接名单。");
+          message.success("联系邮箱已确认，可加入开发信名单。");
         } catch (e) {
           message.error((e as Error).message);
           throw e;
@@ -236,13 +236,13 @@ export default function Workspace() {
     modal.confirm({
       title: "停止联系这家公司？",
       content:
-        "停止新的交接；已交接客户会向邮件系统请求暂停，收到回执后才显示已停止。",
+        "停止新的开发信提交；已提交客户会向邮件系统请求暂停，收到回执后才显示已停止。",
       onOk: async () => {
         try {
           await api(`/api/accounts/${detail.id}/suppress`, {});
           setDetail(undefined);
           await refresh();
-          message.success("已保存禁止联系；邮件系统停发状态见交接记录。");
+          message.success("已保存禁止联系；邮件系统停发状态见开发信记录。");
         } catch (e) {
           message.error((e as Error).message);
           throw e;
@@ -324,7 +324,7 @@ export default function Workspace() {
     ? [
         { key: "accounts", icon: <TeamOutlined />, label: "线索总览" },
         { key: "jobs", icon: <CompassOutlined />, label: "采集任务" },
-        { key: "outreach", icon: <LinkOutlined />, label: "交接与联系状态" },
+        { key: "outreach", icon: <LinkOutlined />, label: "开发信与联系状态" },
       ]
     : [{ key: "accounts", icon: <TeamOutlined />, label: "我的线索" }];
   const labels: Record<string, string> = {
@@ -376,7 +376,7 @@ export default function Workspace() {
       setHandoffOpen(false);
       await refresh();
       setPage("outreach");
-      message.success(`已加入 ${result.queued.length} 家至持久交接队列。`);
+      message.success(`已加入 ${result.queued.length} 家至开发信提交队列。`);
     } catch (e) {
       message.error((e as Error).message);
     } finally {
@@ -607,7 +607,7 @@ export default function Workspace() {
                     disabled={!selected.length || !!error}
                     onClick={() => setHandoffOpen(true)}
                   >
-                    交接名单 ({selected.length})
+                    提交开发信名单 ({selected.length})
                   </Button>}
                 </div>
                 {!screens.lg ? <div className="pipeline-compact-list">
@@ -615,7 +615,7 @@ export default function Workspace() {
                     <div className="pipeline-lead-card-heading"><Avatar>{a.name.slice(0,1)}</Avatar><div><h3>{a.name}</h3><p>{a.sourceType === "sales_inbound" ? (a.sourceMailbox || "邮件来信") : a.domain}</p></div><Button type="link" onClick={()=>openDetail(a)}>详情</Button></div>
                     <div className="pipeline-lead-card-state"><Tag color={a.assignment.pending ? "orange" : a.assignment.status === "returned" ? "red" : a.assignment.owner ? "green" : "default"}>{a.assignment.status === "returned" ? "已退回" : a.assignment.pending ? "待接手" : a.assignment.owner ? "已接受" : "待分配"}</Tag><span>{a.assignment.pending ? `待 ${a.assignment.pending} 接手` : `负责人：${a.assignment.owner || "未分配"}`}</span></div>
                     <div className="pipeline-lead-card-next"><span>{a.followup?.stage || "尚未开始"}</span><strong>{a.followup?.next_step || "未填写下一步"}</strong>{a.followup?.due_at&&<Tag color={a.followup.due_at < new Date().toLocaleDateString("sv-SE") && a.followup.stage !== "结束" ? "red" : "blue"}>{a.followup.due_at}</Tag>}</div>
-                    {isAdmin && a.stage === "ready" && a.sourceType !== "sales_inbound" && <Button size="small" onClick={()=>setSelection(current=>current.includes(a.id)?current.filter(id=>id!==a.id):[...current,a.id])}>{selection.includes(a.id)?"从交接名单移除":"加入交接名单"}</Button>}
+                    {isAdmin && a.stage === "ready" && a.sourceType !== "sales_inbound" && <Button size="small" onClick={()=>setSelection(current=>current.includes(a.id)?current.filter(id=>id!==a.id):[...current,a.id])}>{selection.includes(a.id)?"从开发信名单移除":"加入开发信名单"}</Button>}
                   </article>)}
                   {filtered.length>12&&<Pagination current={Math.min(compactPage,Math.ceil(filtered.length/12))} pageSize={12} total={filtered.length} showSizeChanger={false} onChange={setCompactPage}/>}
                 </div> : <Table
@@ -784,10 +784,10 @@ export default function Workspace() {
                 type={state?.mailConnected ? "info" : "warning"}
                 title={
                   state?.mailConnected
-                    ? "邮件交接接口已配置，以下以接收回执为准"
+                    ? "Aimail 导入接口已配置，以下以接收回执为准"
                     : "邮件接口尚未配置：名单可以排队，但不会发送"
                 }
-                description="邮件内容和发件账户确定后，在 mail2leads 启用经确认的序列。leadsgen 不持有 SMTP 凭据。"
+                description="邮件内容和发件账户确定后，在 Aimail 启用经确认的序列。leadsgen 不持有 SMTP 凭据。"
               />
               <Card title="跟进节奏" className="section-card">
                 <div className="region-priority">
@@ -803,7 +803,7 @@ export default function Workspace() {
                 </Paragraph>
                 <Tag>模板待确定</Tag>
               </Card>
-              <Card title="持久交接记录" className="section-card">
+              <Card title="开发信提交记录" className="section-card">
                 <Table
                   rowKey="id"
                   dataSource={state?.handoffs ?? []}
@@ -815,15 +815,15 @@ export default function Workspace() {
                         h.account_id,
                     },
                     {
-                      title: "交接状态",
+                      title: "导入状态",
                       dataIndex: "status",
                       render: (v) => (
                         <Tag>
                           {(
                             {
-                              queued: "待交接",
-                              delivering: "正在交接",
-                              accepted: "已接收",
+                              queued: "待导入",
+                              delivering: "正在导入",
+                              accepted: "Aimail 已接收",
                               cancelled: "已取消",
                               stop_pending: "停发请求待确认",
                               stopped: "已确认暂停",
@@ -1100,8 +1100,8 @@ export default function Workspace() {
       <Modal
         open={handoffOpen}
         onCancel={() => setHandoffOpen(false)}
-        title="交接名单到 mail2leads"
-        okText="确认加入交接队列"
+        title="提交到 Aimail 起草开发信"
+        okText="确认提交名单"
         confirmLoading={saving}
         onOk={() => void handoff()}
       >
@@ -1122,7 +1122,7 @@ export default function Workspace() {
           type="info"
           showIcon
           title="默认序列：首封 + 第 7、14、28、60、90 天"
-          description="待邮件内容确认后由 mail2leads 激活。回复、退订、硬退信后停止。"
+          description="待邮件内容确认后由 Aimail 激活。回复、退订、硬退信后停止。"
         />
       </Modal>
     </Layout>

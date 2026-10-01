@@ -235,23 +235,24 @@ class Store:
                     ):
                         # Preserve the Leadsgen assignment behind its access grant.
                         continue
-                    if item.get("mailbox") and account.get("sourceMailbox") != item["mailbox"]:
-                        account["sourceMailbox"] = item["mailbox"]
-                        account["department"] = item["mailbox"] + " 来信"
-                        c.execute(
-                            "UPDATE account SET payload=? WHERE id=?",
-                            (json.dumps(account), row["id"]),
-                        )
                     previous = c.execute(
                         "SELECT version FROM account_assignment WHERE account_id=?", (row["id"],)
                     ).fetchone()
-                    if previous and previous["version"] >= item["version"]:
+                    if previous and previous["version"] > item["version"]:
                         continue
+                    if item.get("mailbox") and account.get("sourceMailbox") != item["mailbox"]:
+                        account["sourceMailbox"] = item["mailbox"]
+                        account["department"] = item["mailbox"] + " 来信"
+                    # 同版本也修复旧同步器留下的摘要；较旧版本不能覆盖当前快照。
+                    account["summary"] = item.get("summary", "")
                     account["assignmentAuthority"] = "aimail"
-                    c.execute(
-                        "UPDATE account SET payload=?,updated_at=? WHERE id=?",
-                        (json.dumps(account), now(), row["id"]),
-                    )
+                    if account != json.loads(row["payload"]):
+                        c.execute(
+                            "UPDATE account SET payload=?,updated_at=? WHERE id=?",
+                            (json.dumps(account), now(), row["id"]),
+                        )
+                    if previous and previous["version"] == item["version"]:
+                        continue
                     c.execute(
                         "INSERT INTO account_assignment VALUES(?,?,?,?,?,?) ON "
                         "CONFLICT(account_id) DO UPDATE SET "
@@ -779,19 +780,15 @@ class Store:
                 ):
                     raise ValueError("invalid_confirmed_mail_lead")
                 exists = c.execute(
-                    "SELECT account_id FROM aimail_lead_map WHERE external_id=?", (external_id,)
+                    "SELECT a.id,a.payload FROM account a JOIN aimail_lead_map m "
+                    "ON m.account_id=a.id WHERE m.external_id=?",
+                    (external_id,),
                 ).fetchone()
-                if exists:
-                    c.execute(
-                        "UPDATE aimail_lead_map SET updated_at=? WHERE external_id=?",
-                        (now(), external_id),
-                    )
-                    continue
                 tid = str(source.get("thread_id", ""))
                 projected = next(
                     (
                         r
-                        for r in c.execute("SELECT id,payload FROM account")
+                        for r in ([] if exists else c.execute("SELECT id,payload FROM account"))
                         if json.loads(r["payload"]).get("assignmentAuthority") == "aimail"
                         and str(json.loads(r["payload"]).get("aimailThreadId")) == tid
                         and not c.execute(
@@ -800,12 +797,6 @@ class Store:
                     ),
                     None,
                 )
-                if projected:
-                    c.execute(
-                        "INSERT INTO aimail_lead_map VALUES(?,?,?)",
-                        (external_id, projected["id"], now()),
-                    )
-                    continue
                 digest = hashlib.sha256(external_id.encode()).hexdigest()[:24]
                 account_id = "mail_" + digest
                 thread_id = str(source.get("thread_id", ""))[:80]
@@ -855,6 +846,39 @@ class Store:
                     "aimailContact": contact,
                     "aimailQuantity": str(item.get("quantity", ""))[:200],
                 }
+                target = exists or projected
+                if target:
+                    current = json.loads(target["payload"])
+                    # 只刷新 Aimail 提供的客户资料；本地阶段、分类、负责人和跟进另有权威。
+                    fields = {
+                        "company": "name",
+                        "email": "email",
+                        "contact": "aimailContact",
+                        "quantity": "aimailQuantity",
+                        "wants": "summary",
+                    }
+                    for source_key, key in fields.items():
+                        if source_key not in item:
+                            continue
+                        if source_key == "wants" and current.get("assignmentAuthority") == "aimail":
+                            # 邮件交接中经人审的摘要比初次询盘更完整。
+                            continue
+                        current[key] = account[key]
+                    current["aimailLeadId"] = external_id
+                    current["sourceMailbox"] = account["sourceMailbox"]
+                    if "email" in item:
+                        current.setdefault("evidence", {})["email"] = email
+                    if current != json.loads(target["payload"]):
+                        c.execute(
+                            "UPDATE account SET payload=?,updated_at=? WHERE id=?",
+                            (json.dumps(current, ensure_ascii=False), now(), target["id"]),
+                        )
+                    c.execute(
+                        "INSERT INTO aimail_lead_map VALUES(?,?,?) ON CONFLICT(external_id) "
+                        "DO UPDATE SET updated_at=excluded.updated_at",
+                        (external_id, target["id"], now()),
+                    )
+                    continue
                 c.execute(
                     "INSERT INTO account(id,domain,payload,updated_at) VALUES(?,?,?,?)",
                     (account_id, account["domain"], json.dumps(account, ensure_ascii=False), now()),
