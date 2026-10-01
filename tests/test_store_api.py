@@ -172,6 +172,64 @@ def test_confirmed_lead_import_rejects_other_mailboxes(tmp_path):
         )
 
 
+@pytest.mark.parametrize("projected", [False, True])
+def test_confirmed_profile_refresh_preserves_assignment_and_followup(tmp_path, projected):
+    store = Store(tmp_path / "app.sqlite3")
+    if projected:
+        store.import_mail_handoffs(
+            [
+                dict(
+                    thread_id=991,
+                    version=2,
+                    owner="isaac@example.com",
+                    pending="",
+                    subject="RFQ",
+                    summary="Reviewed handoff summary",
+                    history=[],
+                    updated_at="2026-09-27T00:00:00Z",
+                )
+            ]
+        )
+    lead = dict(
+        version="lead@1",
+        id="42",
+        company="Example Buyer",
+        contact="Alex",
+        email="alex@example.net",
+        wants="20 modules",
+        quantity="20",
+        region="美国",
+        source=dict(mailbox="sales@glocalstorage.com", thread_id="991"),
+    )
+    store.import_confirmed_leads([lead], "2026-09-27T00:00:00Z", 42)
+    account_id = store.accounts()[0]["id"]
+    if not projected:
+        store.assign(account_id, "isaac@example.com", "admin", 0)
+        store.accept_assignment(account_id, "isaac@example.com", 1)
+    store.update_followup(
+        account_id, "isaac@example.com", "等待客户", "Confirm quote", "2026-10-08"
+    )
+    before = store.accounts()[0]
+    with store.connect() as conn:
+        notices_before = [dict(row) for row in conn.execute("SELECT * FROM assignment_notice")]
+    lead.update(company="Example Buyer Ltd", contact="Alex Li", wants="40 modules", quantity="40")
+    assert store.import_confirmed_leads([lead], "2026-09-28T00:00:00Z", 42) == 0
+    after = store.accounts()[0]
+    assert len(store.accounts()) == 1
+    assert after["id"] == account_id
+    assert after["name"] == "Example Buyer Ltd"
+    assert after["aimailContact"] == "Alex Li"
+    assert after["aimailQuantity"] == "40"
+    assert after["aimailLeadId"] == "42"
+    assert after["summary"] == ("Reviewed handoff summary" if projected else "40 modules")
+    assert after["assignment"] == before["assignment"]
+    assert after["followup"] == before["followup"]
+    with store.connect() as conn:
+        assert [
+            dict(row) for row in conn.execute("SELECT * FROM assignment_notice")
+        ] == notices_before
+
+
 def test_api_persists_jobs_and_requires_same_origin_custom_header(tmp_path):
     app = create_app(tmp_path / "app.sqlite3", worker_enabled=False)
     with TestClient(app) as client:
@@ -415,13 +473,19 @@ def test_mail_handoff_projection_preserves_owner_and_blocks_double_assignment(tm
     assert not store.assigned_accounts("other@example.com")
     with pytest.raises(ValueError):
         store.accept_assignment("handoff_232", "isaac@example.com", 1)
-    item.update(version=2, owner="isaac@example.com", pending="")
+    item.update(
+        version=2, owner="isaac@example.com", pending="", summary="40 servers; quote due Friday"
+    )
     store.import_mail_handoffs([item])
     assert store.accounts()[0]["assignment"]["status"] == "accepted"
+    assert store.accounts()[0]["summary"] == "40 servers; quote due Friday"
     assert not store.assigned_accounts("larry@example.com")
-    item.update(version=1, owner="larry@example.com", pending="isaac@example.com")
+    item.update(
+        version=1, owner="larry@example.com", pending="isaac@example.com", summary="20 servers"
+    )
     store.import_mail_handoffs([item])
     assert store.accounts()[0]["assignment"]["owner"] == "isaac@example.com"
+    assert store.accounts()[0]["summary"] == "40 servers; quote due Friday"
 
 
 def test_notification_outbox_uses_snapshot_and_cancels_withdrawn_assignment(tmp_path, monkeypatch):

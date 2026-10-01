@@ -297,7 +297,7 @@ export default function App() {
           <div className="eyebrow">YOUR NEXT CUSTOMER STARTS HERE</div>
           <Title level={2}>找到对的客户，建立有据可查的档案。</Title>
           <Paragraph className="page-subtitle">
-            聚焦数据中心整机与配件买家。发现公开业务邮箱后建档，交给 mail2leads
+            聚焦数据中心整机与配件买家。发现公开业务邮箱后建档，交给 Aimail
             开始对话。
           </Paragraph>
         </div>
@@ -332,7 +332,7 @@ export default function App() {
           {
             label: "已收到回复",
             value: data.filter((a) => a.mail === "replied").length,
-            note: "后续跟踪归 mail2leads",
+            note: "邮件往来由 Aimail 处理",
             icon: <MailOutlined />,
           },
         ].map((m) => (
@@ -509,7 +509,7 @@ export default function App() {
             { title: "发现官网", content: "案例 / 目录 / 搜索" },
             { title: "查找业务邮箱", content: "首页 + 联系页优先" },
             { title: "补充基础档案", content: "品牌证据 / 分类 / 去重" },
-            { title: "审核后交接", content: "mail2leads 首封草稿" },
+            { title: "审核后交接", content: "Aimail 首封草稿" },
           ]}
         />
       </Card>
@@ -600,7 +600,7 @@ export default function App() {
           <div className="eyebrow">A CLEAN HANDOFF</div>
           <Title level={2}>名单到这里，下一步是对话。</Title>
           <Paragraph className="page-subtitle">
-            leadsgen 管理交接记录；首封审核、发送和回复由 mail2leads 负责。
+            Leadsgen 管理客户与跟进；首封审核、发送和回复由 Aimail 负责。
           </Paragraph>
         </div>
         <Tag icon={<InfoCircleOutlined />}>接口待实现</Tag>
@@ -655,7 +655,7 @@ export default function App() {
                   : a.mail === "accepted"
                     ? "服务器接受不等于送达"
                     : a.mail === "replied"
-                      ? "在 mail2leads 继续跟踪"
+                      ? "在 Aimail 继续跟踪"
                       : "停止再次交接",
             },
           ]}
@@ -1019,7 +1019,7 @@ export default function App() {
                         showIcon
                         type="info"
                         title={mailInfo[detail.mail].label}
-                        description="邮件状态仅为演示；真实状态必须来自 mail2leads 回执。"
+                        description="邮件状态仅为演示；真实状态必须来自 Aimail 回执。"
                       />
                       <Timeline
                         className="detail-section"
@@ -1063,7 +1063,7 @@ export default function App() {
               }}
             >
               {detail.stage === "ready"
-                ? "预览交接到 mail2leads"
+                ? "预览交接到 Aimail"
                 : detail.stage === "review"
                   ? "资料待核验，暂不交接"
                   : detail.stage === "queued"
@@ -1100,7 +1100,7 @@ export default function App() {
           type="info"
           showIcon
           title={`${eligible.length} 家公司 · 每家公司 1 个业务邮箱`}
-          description="真实版本接入后，mail2leads 接收名单并准备首封草稿，由你在那里审核并发送。本原型只更新页面演示状态。"
+          description="真实版本接入后，Aimail 接收名单并准备首封草稿，由你在那里审核并发送。本原型只更新页面演示状态。"
         />
         <div className="handoff-preview">
           {eligible.map((a) => (
@@ -1127,7 +1127,7 @@ export default function App() {
             {
               key: "template",
               label: "首封模板",
-              children: "稍后在 mail2leads 准备与确认",
+              children: "稍后在 Aimail 准备与确认",
             },
             {
               key: "action",

@@ -1,22 +1,24 @@
 # v0.2 交接接口
 
-leadsgen 只发现、采集、建档、交接和镜像邮件状态，不持有 SMTP 密码，也不执行跟进。
-mail2leads 候选分支提供下列接口；导入令牌与人工发送授权完全分开。
+Leadsgen 负责发现、来信客户建档、分配与早期跟进；Aimail 保管原邮件和个人发件身份。
+本页描述开发信接缝；完整来信、接手和权限合同见
+[跨仓库销售工作流](https://github.com/niuroumiantt/infra/blob/main/docs/sales-workflow.md)。
+Aimail 提供下列接口；导入令牌与人工发送授权完全分开。
 
 ## 导入与回执
 
 `POST /v1/prospects/import`，`Authorization: Bearer` 专用 `OUTREACH_IMPORT_TOKEN`。
-JSON 必含 `schema_version=1`、`external_id`、`idempotency_key`、`company`、`website`、
+JSON 必含 `schema_version="1"`、`external_id`、`idempotency_key`、`company`、`website`、
 `email`、`country`、`tier`、`source.url`、`policy_version`、`cadence_days=[0,7,14,28,60,90]`。
 source 同时保留采集时间、网页哈希、原文短片段、邮箱角色和邮件域检查。
 
 回执：`receipt_id`、`external_id`、`status=imported`。它只证明导入，不代表发送。
 同一邮箱/公司幂等键/外部编号各自唯一；完全相同的请求返回原回执，冲突返回 409。
-当前去重范围为配置的一个 mail2leads mailbox；跨邮箱组织级去重未实现，不应多邮箱并行投放。
+当前去重范围为配置的一个 Aimail mailbox；跨邮箱组织级去重未实现，不应多邮箱并行投放。
 
 ## 人工确认与执行
 
-mail2leads 的 `/outreach` 页面显示名单、六封完整内容和停止状态。
+Aimail 的 `/outreach` 页面显示名单、六封完整内容和停止状态。
 人工确认使用现有登录身份、同站校验头以及一次性令牌；机器令牌不能批准。
 批准绑定发件地址、收件邮箱与六封完整正文哈希，之后不能修改或重新启用。同一公司的六封不需要逐封再次点击。
 实际发送还要求 `OUTREACH_ENABLED=1`、完整发件地址、成功完成最新 INBOX 同步。
@@ -45,6 +47,6 @@ leadsgen 的排除操作保留本地禁止联系，并等待邮件系统停发�
 
 机器接口只接收专用令牌，不能将现有 OA cookie 或 SMTP 密码用作集成令牌。
 公开用户界面需要 OA 登录及可信代理；机器接口通过受控私有网络访问，不能为了接入而绕过整个站点登录。
-mail2leads 的开发信人工接口另需可信代理注入 `X-Outreach-Approval-Key`，值为独立的
+Aimail 的开发信人工接口另需可信代理注入 `X-Outreach-Approval-Key`，值为独立的
 `OUTREACH_APPROVAL_PROXY_KEY`；不能与导入令牌共用，否则导入方可能伪造人工身份。
 一套数据库仅运行一个采集 worker、一个邮件 poller。真实库与凭据不进入 Git。
