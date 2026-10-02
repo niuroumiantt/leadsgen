@@ -20,6 +20,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from .crawl import CrawlError, crawl
 from .policy import CADENCE_DAYS, POLICY_VERSION
 from .store import Store, now
+from .workflow import VersionConflict
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +64,32 @@ class FollowupInput(BaseModel):
     stage: Literal["待联系", "跟进中", "等待客户", "等待内部", "稍后跟进", "结束"]
     next_step: str = Field(default="", max_length=500)
     due_at: str = Field(default="", max_length=40)
+
+
+class ProfileInput(BaseModel):
+    product: str = Field(default="", max_length=300)
+    quantity: str = Field(default="", max_length=100)
+    country: str = Field(default="", max_length=100)
+    quote_ref: str = Field(default="", max_length=200)
+    order_ref: str = Field(default="", max_length=200)
+
+
+class ProgressInput(FollowupInput):
+    version: int = Field(ge=0)
+    milestone: str = Field(max_length=30)
+    profile: ProfileInput = Field(default_factory=ProfileInput)
+    reason: str = Field(default="", max_length=1000)
+
+
+class CompanyInput(BaseModel):
+    target_id: str | None = Field(default=None, max_length=150)
+    version: int = Field(ge=0)
+    target_version: int | None = Field(default=None, ge=0)
+    reason: str = Field(min_length=1, max_length=1000)
+
+
+class RetryInput(BaseModel):
+    attempt_id: int = Field(ge=1)
 
 
 def deliver_one(store: Store, endpoint: str, token: str):
@@ -310,36 +337,54 @@ def sync_followup_access(store: Store, endpoint: str, token: str):
 
 
 def worker(store: Store, stop: threading.Event, endpoint: str, token: str):
+    """Mail integration has its own loop; a slow website cannot hold up handoffs."""
     while not stop.is_set():
-        candidate = None
+        failed = False
         for sync in (
             sync_mail,
             sync_confirmed_leads,
             sync_followup_access,
             sync_mail_handoffs,
             send_assignment_notices,
+            deliver_one,
         ):
+            if stop.is_set():
+                break
             try:
                 sync(store, endpoint, token)
             except Exception:
+                failed = True
                 log.warning("Mail integration step temporarily unavailable")
-        try:
-            deliver_one(store, endpoint, token)
-        except Exception:
-            log.warning("Mail delivery step temporarily unavailable")
+        store.worker_heartbeat("integration", "idle", error="邮件同步暂不可用" if failed else "")
+        stop.wait(5)
+
+
+def collection_worker(store: Store, stop: threading.Event):
+    while not stop.is_set():
+        candidate = None
         try:
             candidate = store.claim()
+            store.worker_heartbeat(
+                "collection",
+                "running" if candidate else "idle",
+                candidate["id"] if candidate else None,
+            )
             if candidate:
                 try:
-                    result = crawl(json.loads(candidate["seed"]))
+                    result = crawl(
+                        json.loads(candidate["seed"]),
+                        progress=lambda event, current=candidate: store.observe(current, event),
+                    )
                 except CrawlError as exc:
                     result = {"status": "failed", "reason": str(exc)}
                 except Exception:
-                    log.exception("Crawler failed for candidate id %s", candidate["id"])
+                    log.warning("Crawler failed for candidate id %s", candidate["id"])
                     result = {"status": "failed", "reason": "crawl_failed"}
                 store.finish(candidate, result)
+                store.worker_heartbeat("collection", "idle")
         except Exception:
-            log.exception("Crawl queue temporarily unavailable")
+            log.warning("Crawl queue temporarily unavailable")
+            store.worker_heartbeat("collection", "error", error="采集任务暂不可用")
         stop.wait(1 if candidate else 5)
 
 
@@ -360,16 +405,19 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app):
-        thread = None
+        threads = []
         if worker_enabled:
             store.recover()
-            thread = threading.Thread(
-                target=worker, args=(store, stop, endpoint, integration_token), daemon=True
-            )
-            thread.start()
+            for target, args in (
+                (worker, (store, stop, endpoint, integration_token)),
+                (collection_worker, (store, stop)),
+            ):
+                thread = threading.Thread(target=target, args=args, daemon=True)
+                threads.append(thread)
+                thread.start()
         yield
         stop.set()
-        if thread:
+        for thread in threads:
             await asyncio.to_thread(thread.join, 2)
 
     app = FastAPI(title="leadsgen", version="0.2.0", lifespan=lifespan)
@@ -447,6 +495,7 @@ def create_app(
             if is_admin
             else store.assigned_accounts(request.state.identity),
             "jobs": store.jobs() if is_admin else [],
+            "collection": store.collection_status() if is_admin else None,
             "handoffs": store.handoffs() if is_admin else [],
             "cadenceDays": CADENCE_DAYS,
             "policyVersion": POLICY_VERSION,
@@ -495,8 +544,6 @@ def create_app(
 
     @app.post("/api/accounts/{account_id}/assignment/accept")
     def accept_account(account_id: str, body: AssignmentDecision, request: Request):
-        if request.state.role != "sales":
-            raise HTTPException(403, "只有被分配的销售员工可以接手")
         try:
             projected = decide_projected(account_id, request.state.identity, body.version, "accept")
             if projected is not None:
@@ -511,8 +558,6 @@ def create_app(
 
     @app.post("/api/accounts/{account_id}/assignment/decline")
     def decline_account(account_id: str, body: AssignmentDecline, request: Request):
-        if request.state.role != "sales":
-            raise HTTPException(403, "只有被分配的销售员工可以退回")
         try:
             if not body.reason.strip():
                 raise ValueError("请填写退回原因")
@@ -542,14 +587,84 @@ def create_app(
 
     @app.post("/api/accounts/{account_id}/followup")
     def update_account_followup(account_id: str, body: FollowupInput, request: Request):
-        if request.state.role != "sales":
-            raise HTTPException(403, "跟进状态只能由当前负责人更新")
         try:
             return store.update_followup(
                 account_id, request.state.identity, body.stage, body.next_step, body.due_at
             )
         except PermissionError as exc:
             raise HTTPException(403, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/accounts/{account_id}/activity")
+    def activity(account_id: str, request: Request, before: int | None = None):
+        try:
+            return store.activities(
+                account_id, request.state.identity, request.state.role == "admin", before
+            )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/api/accounts/{account_id}/progress")
+    def progress(account_id: str, body: ProgressInput, request: Request):
+        try:
+            return store.update_progress(
+                account_id,
+                request.state.identity,
+                body.stage,
+                body.next_step,
+                body.due_at,
+                version=body.version,
+                milestone=body.milestone,
+                profile=body.profile.model_dump(),
+                reason=body.reason,
+            )
+        except PermissionError as exc:
+            raise HTTPException(403, str(exc)) from exc
+        except VersionConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.post("/api/accounts/{account_id}/company")
+    def company(account_id: str, body: CompanyInput, request: Request):
+        if request.state.role != "admin":
+            raise HTTPException(403, "只有管理员可以核实企业关联")
+        try:
+            return store.link_company(
+                account_id,
+                body.target_id,
+                body.version,
+                body.target_version,
+                request.state.identity,
+                body.reason,
+            )
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except VersionConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+
+    @app.get("/api/candidates/{candidate_id}/attempts")
+    def attempts(candidate_id: int, request: Request):
+        if request.state.role != "admin":
+            raise HTTPException(403, "只有管理员可以查看采集过程")
+        try:
+            return store.candidate_history(candidate_id)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+
+    @app.post("/api/candidates/{candidate_id}/retry")
+    def retry(candidate_id: int, body: RetryInput, request: Request):
+        if request.state.role != "admin":
+            raise HTTPException(403, "只有管理员可以重试采集")
+        try:
+            return store.queue_retry(candidate_id, body.attempt_id, request.state.identity)
+        except LookupError as exc:
+            raise HTTPException(404, str(exc)) from exc
+        except VersionConflict as exc:
+            raise HTTPException(409, str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(422, str(exc)) from exc
 

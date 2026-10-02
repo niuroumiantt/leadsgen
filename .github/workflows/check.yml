@@ -1,0 +1,28 @@
+name: Check
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.12.19'
+          python-version: '3.12'
+          enable-cache: true
+      - run: uv sync --locked
+      - run: uv run ruff check server tests checks
+      - run: uv run pytest -q
+      - run: npm ci
+      - run: npm run build
+      - run: uv run playwright install --with-deps chromium
+      - run: uv run pytest checks/browser_test.py -q

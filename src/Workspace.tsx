@@ -1,11 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   Alert,
   App,
   Button,
   Card,
   Collapse,
-  Timeline,
   Avatar,
   Dropdown,
   Descriptions,
@@ -36,97 +35,13 @@ import {
   SettingOutlined,
 } from "@ant-design/icons";
 import { regions, stageInfo, mailInfo } from "./data";
-import type { Account } from "./data";
+import type { LiveAccount, State } from "./live-types";
+import { milestones } from "./live-types";
+import { api } from "./api";
+import CollectionWorkspace from "./CollectionWorkspace";
+import CustomerProgress from "./CustomerProgress";
 
 const { Title, Text, Paragraph } = Typography;
-type Contact = {
-  email: string;
-  role: string;
-  url: string;
-  excerpt: string;
-  observedAt: string;
-  mailRoute: string;
-};
-type LiveAccount = Account & {
-  website: string;
-  phone: string;
-  contacts: Contact[];
-  evidence: Contact;
-  mailRoute: string;
-  observedAt: string;
-  classificationVerified: boolean;
-  sourceType?: "sales_inbound" | "discovery";
-  sourceMailbox?: string;
-  aimailLeadId?: string;
-  assignmentAuthority?: "aimail";
-  aimailThreadId?: string;
-  aimailContact?: string;
-  aimailQuantity?: string;
-  assignment: {
-    owner: string;
-    pending: string;
-    version: number;
-    status?: string;
-    notification?: {state:string; last_error:string};
-    updated_at?: string;
-    history?: {actor:string; action:string; recipient:string; reason:string; version:number; created_at:string}[];
-    mail_access_status?: string;
-    mail_access_error?: string;
-  };
-  followup: { stage: string; next_step: string; due_at: string } | null;
-};
-type Job = {
-  id: string;
-  name: string;
-  region: string;
-  created_at: string;
-  candidates: {
-    id: number;
-    url: string;
-    status: string;
-    reason: string;
-    pages: number;
-  }[];
-};
-type State = {
-  role: "admin" | "sales";
-  identity: string;
-  members: string[];
-  accounts: LiveAccount[];
-  jobs: Job[];
-  handoffs: {
-    id: string;
-    account_id: string;
-    status: string;
-    last_error: string;
-    attempts: number;
-  }[];
-  mailConnected: boolean;
-  cadenceDays: number[];
-};
-
-async function api<T>(path: string, body?: unknown): Promise<T> {
-  const response = await fetch(path, {
-    method: body === undefined ? "GET" : "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Leadsgen-Client": "web-v1",
-    },
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-  if (!response.ok) {
-    const error = await response
-      .json()
-      .catch(() => ({ detail: "服务响应异常" }));
-    throw new Error(
-      typeof error.detail === "string"
-        ? error.detail
-        : `请求失败 (${response.status})`,
-    );
-  }
-  return response.json();
-}
-
 export default function Workspace() {
   const { message, modal } = App.useApp();
   const [state, setState] = useState<State>();
@@ -149,16 +64,17 @@ export default function Workspace() {
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [assignee, setAssignee] = useState("");
-  const [nextStep, setNextStep] = useState("");
-  const [dueAt, setDueAt] = useState("");
-  const [followupStage, setFollowupStage] = useState("待联系");
   const [form] = Form.useForm();
+  const refreshSequence = useRef(0);
   const refresh = useCallback(async () => {
+    const request = ++refreshSequence.current;
     try {
-      setState(await api<State>("/api/state"));
+      const next = await api<State>("/api/state");
+      if (request !== refreshSequence.current) return;
+      setState(next);
       setError("");
     } catch (e) {
-      setError((e as Error).message);
+      if (request === refreshSequence.current) setError((e as Error).message);
     }
   }, []);
   useEffect(() => {
@@ -173,8 +89,7 @@ export default function Workspace() {
     if (requested) {
       const target = state.accounts.find(account=>account.id === requested);
       if (target) {
-        setDetail(target); setNextStep(target.followup?.next_step ?? "");
-        setDueAt(target.followup?.due_at ?? ""); setFollowupStage(target.followup?.stage ?? "待联系");
+        setDetail(target);
       }
       else message.info("这条线索已撤回或不属于当前账号，请联系管理员。");
       window.history.replaceState(null, "", window.location.pathname);
@@ -185,9 +100,6 @@ export default function Workspace() {
   const openDetail = (account: LiveAccount) => {
     setDetail(account);
     setReturnReason("");
-    setNextStep(account.followup?.next_step ?? "");
-    setDueAt(account.followup?.due_at ?? "");
-    setFollowupStage(account.followup?.stage ?? "待联系");
   };
   const filtered = data
     .filter(
@@ -197,7 +109,7 @@ export default function Workspace() {
             .toLowerCase()
             .includes(query.toLowerCase())) &&
         (!ownerFilter || a.assignment.owner === ownerFilter || a.assignment.pending === ownerFilter) &&
-        (!statusFilter || (statusFilter === "overdue" ? !!a.followup?.due_at && a.followup.due_at < new Date().toLocaleDateString("sv-SE") && a.followup.stage !== "结束" : a.assignment.status === statusFilter)) &&
+        (!statusFilter || (statusFilter === "overdue" ? !!a.followup?.due_at && a.followup.due_at < new Date().toLocaleDateString("sv-SE") && a.followup.stage !== "结束" : statusFilter === "unplanned" ? !!a.assignment.owner && (!a.followup?.next_step || !a.followup?.due_at) && a.followup?.stage !== "结束" : a.assignment.status === statusFilter)) &&
         (!sourceFilter || (a.sourceType || "discovery") === sourceFilter) &&
         (!region || a.region === region) &&
         (!country || a.country === country) &&
@@ -302,24 +214,6 @@ export default function Workspace() {
       setDetail(undefined); await refresh(); message.success("已撤回待接手交接。");
     } catch(e) {message.error((e as Error).message);} finally {setSaving(false);}
   };
-  const saveFollowup = async () => {
-    if (!detail) return;
-    setSaving(true);
-    try {
-      await api(`/api/accounts/${detail.id}/followup`, {
-        stage: followupStage,
-        next_step: nextStep,
-        due_at: dueAt,
-      });
-      setDetail(undefined);
-      await refresh();
-      message.success("跟进计划已保存。");
-    } catch (e) {
-      message.error((e as Error).message);
-    } finally {
-      setSaving(false);
-    }
-  };
   const items = isAdmin
     ? [
         { key: "accounts", icon: <TeamOutlined />, label: "线索总览" },
@@ -327,13 +221,6 @@ export default function Workspace() {
         { key: "outreach", icon: <LinkOutlined />, label: "开发信与联系状态" },
       ]
     : [{ key: "accounts", icon: <TeamOutlined />, label: "我的线索" }];
-  const labels: Record<string, string> = {
-    queued: "等待采集",
-    running: "正在采集",
-    completed: "已建档",
-    skipped: "已跳过",
-    failed: "采集失败",
-  };
   const createJob = async (values: Record<string, string>) => {
     const urls = values.urls
       .split(/\r?\n/)
@@ -491,11 +378,11 @@ export default function Workspace() {
                 {page === "accounts"
                   ? isAdmin ? "线索总览" : "我的线索"
                   : page === "jobs"
-                    ? "每一次采集都有结果和出处。"
+                    ? "采集工作台"
                     : "首封之后，按计划继续联系。"}
               </Title>
               <Paragraph className="page-subtitle">
-                {isAdmin ? "统一查看主动开发与客户来信，追踪分配、接手和跟进进展。" : "查看交接摘要，接受或退回线索，并记录下一步行动。"}
+                {isAdmin ? "按企业组织主动开发与客户来信，查看业务阶段、交接和下一步。" : "查看交接摘要，接受或退回线索，并记录下一步行动。"}
               </Paragraph>
             </div>
             {isAdmin && <Button
@@ -508,6 +395,7 @@ export default function Workspace() {
           </div>
           {page === "accounts" && (
             <>
+              <Paragraph type="secondary" className="source-counts">{new Set(data.map(a => a.company.company_id)).size} 个企业档案 · {data.filter(a=>a.sourceType !== "sales_inbound").length} 条官网来源 · {data.filter(a=>a.sourceType === "sales_inbound").length} 条来信来源；同一企业的不同询价保留各自进展。</Paragraph>
               <div className="metrics">
                 {(isAdmin ? [
                   { label: "全部线索", value: data.length },
@@ -530,7 +418,7 @@ export default function Workspace() {
               </div>
               <div className="accounts-panel">
                 <div className="pipeline-toolbar">
-                  <div className="pipeline-status-tabs" role="group" aria-label="常用线索视图">{[{value:undefined,label:"全部线索"},{value:"pending",label:"待接手"},{value:"accepted",label:"已接受"},{value:"returned",label:"已退回"},{value:"overdue",label:"跟进逾期"}].map(item=><Button key={item.label} type={statusFilter===item.value?"primary":"text"} onClick={()=>setStatusFilter(item.value)}>{item.label}</Button>)}</div>
+                  <div className="pipeline-status-tabs" role="group" aria-label="常用线索视图">{[{value:undefined,label:"全部线索"},{value:"pending",label:"待接手"},{value:"accepted",label:"已接受"},{value:"returned",label:"已退回"},{value:"overdue",label:"跟进逾期"},{value:"unplanned",label:"待安排下一步"}].map(item=><Button key={item.label} type={statusFilter===item.value?"primary":"text"} onClick={()=>setStatusFilter(item.value)}>{item.label}</Button>)}</div>
                   <div className="pipeline-filter-row">
                   <Input
                     className="search-input"
@@ -544,7 +432,7 @@ export default function Workspace() {
                   />
                 <div className="pipeline-primary-filters">
                   {isAdmin && <Select aria-label="按跟进员工筛选" placeholder="全部员工" allowClear style={{minWidth:240}} value={ownerFilter} onChange={setOwnerFilter} options={(state?.members ?? []).map(value=>({value,label:value}))} />}
-                  <Select aria-label="按交接状态筛选" placeholder="全部交接状态" allowClear style={{minWidth:180}} value={statusFilter} onChange={setStatusFilter} options={[{value:"unassigned",label:"待分配"},{value:"pending",label:"待接手"},{value:"accepted",label:"已接受"},{value:"returned",label:"已退回"},{value:"overdue",label:"跟进逾期"}]} />
+                  <Select aria-label="按交接状态筛选" placeholder="全部交接状态" allowClear style={{minWidth:180}} value={statusFilter} onChange={setStatusFilter} options={[{value:"unassigned",label:"待分配"},{value:"pending",label:"待接手"},{value:"accepted",label:"已接受"},{value:"returned",label:"已退回"},{value:"overdue",label:"跟进逾期"},{value:"unplanned",label:"待安排下一步"}]} />
                   <Select aria-label="按来源筛选" placeholder="全部来源" allowClear style={{minWidth:180}} value={sourceFilter} onChange={setSourceFilter} options={[{value:"sales_inbound",label:"邮件来信"},{value:"discovery",label:"主动开发"}]} />
                 </div>
                   </div>
@@ -614,7 +502,7 @@ export default function Workspace() {
                   {!state && !error ? <Card loading /> : !filtered.length ? <Empty description={isAdmin ? "没有符合筛选条件的线索" : "暂时没有分配给你的线索"} /> : filtered.slice((Math.min(compactPage,Math.ceil(filtered.length/12))-1)*12,Math.min(compactPage,Math.ceil(filtered.length/12))*12).map(a=><article className="pipeline-lead-card" key={a.id}>
                     <div className="pipeline-lead-card-heading"><Avatar>{a.name.slice(0,1)}</Avatar><div><h3>{a.name}</h3><p>{a.sourceType === "sales_inbound" ? (a.sourceMailbox || "邮件来信") : a.domain}</p></div><Button type="link" onClick={()=>openDetail(a)}>详情</Button></div>
                     <div className="pipeline-lead-card-state"><Tag color={a.assignment.pending ? "orange" : a.assignment.status === "returned" ? "red" : a.assignment.owner ? "green" : "default"}>{a.assignment.status === "returned" ? "已退回" : a.assignment.pending ? "待接手" : a.assignment.owner ? "已接受" : "待分配"}</Tag><span>{a.assignment.pending ? `待 ${a.assignment.pending} 接手` : `负责人：${a.assignment.owner || "未分配"}`}</span></div>
-                    <div className="pipeline-lead-card-next"><span>{a.followup?.stage || "尚未开始"}</span><strong>{a.followup?.next_step || "未填写下一步"}</strong>{a.followup?.due_at&&<Tag color={a.followup.due_at < new Date().toLocaleDateString("sv-SE") && a.followup.stage !== "结束" ? "red" : "blue"}>{a.followup.due_at}</Tag>}</div>
+                    <div className="pipeline-lead-card-next"><span>{milestones[a.workflow.milestone]} · {a.followup?.stage || "尚未开始"}</span><strong>{a.followup?.next_step || "未填写下一步"}</strong>{a.followup?.due_at&&<Tag color={a.followup.due_at < new Date().toLocaleDateString("sv-SE") && a.followup.stage !== "结束" ? "red" : "blue"}>{a.followup.due_at}</Tag>}</div>
                     {isAdmin && a.stage === "ready" && a.sourceType !== "sales_inbound" && <Button size="small" onClick={()=>setSelection(current=>current.includes(a.id)?current.filter(id=>id!==a.id):[...current,a.id])}>{selection.includes(a.id)?"从开发信名单移除":"加入开发信名单"}</Button>}
                   </article>)}
                   {filtered.length>12&&<Pagination current={Math.min(compactPage,Math.ceil(filtered.length/12))} pageSize={12} total={filtered.length} showSizeChanger={false} onChange={setCompactPage}/>}
@@ -707,7 +595,7 @@ export default function Workspace() {
                     {
                       title: "跟进进展 / 下一步",
                       width: 260,
-                      render: (_, a) => <><div>{a.followup?.stage || "尚未开始"}</div><div>{a.followup?.next_step || "未填写下一步"}</div>{a.followup?.due_at && <Tag color={a.followup.due_at < new Date().toLocaleDateString("sv-SE") && a.followup.stage !== "结束" ? "red" : "blue"}>{a.followup.due_at}</Tag>}</>,
+                      render: (_, a) => <><Tag color="blue">{milestones[a.workflow.milestone]}</Tag><div>{a.followup?.stage || "尚未开始"}</div><div>{a.followup?.next_step || "未填写下一步"}</div>{a.followup?.due_at && <Tag color={a.followup.due_at < new Date().toLocaleDateString("sv-SE") && a.followup.stage !== "结束" ? "red" : "blue"}>{a.followup.due_at}</Tag>}</>,
                     },
                     {
                       title: "操作",
@@ -724,59 +612,7 @@ export default function Workspace() {
               </div>
             </>
           )}
-          {page === "jobs" && (
-            <>
-              <Alert
-                showIcon
-                type="info"
-                title="有界采集，后台持续运行"
-                description="只访问公开官网，读取联系页优先。没有业务邮箱不建档；sales@、info@、support@ 均可保留。每批最多 30 个网站。"
-              />
-              <Card title="采集批次" className="section-card">
-                <Table
-                  rowKey="id"
-                  dataSource={state?.jobs ?? []}
-                  expandable={{
-                    expandedRowRender: (j) => (
-                      <Table
-                        size="small"
-                        rowKey="id"
-                        pagination={false}
-                        dataSource={j.candidates}
-                        columns={[
-                          { title: "官网", dataIndex: "url" },
-                          {
-                            title: "状态",
-                            dataIndex: "status",
-                            render: (v) => <Tag>{labels[v] ?? v}</Tag>,
-                          },
-                          { title: "已读页数", dataIndex: "pages" },
-                          { title: "结果 / 原因", dataIndex: "reason" },
-                        ]}
-                      />
-                    ),
-                  }}
-                  columns={[
-                    { title: "任务", dataIndex: "name" },
-                    { title: "区域", dataIndex: "region" },
-                    { title: "网站数", render: (_, j) => j.candidates.length },
-                    {
-                      title: "已完成",
-                      render: (_, j) =>
-                        j.candidates.filter((c) =>
-                          ["completed", "skipped", "failed"].includes(c.status),
-                        ).length,
-                    },
-                    {
-                      title: "创建时间",
-                      dataIndex: "created_at",
-                      render: (v) => new Date(v).toLocaleString(),
-                    },
-                  ]}
-                />
-              </Card>
-            </>
-          )}
+          {page === "jobs" && <CollectionWorkspace jobs={state?.jobs ?? []} status={state?.collection ?? null} accounts={data} refresh={refresh} onNewJob={(url) => {form.setFieldsValue({urls:url}); setJobOpen(true);}} onAccount={openDetail} />}
           {page === "outreach" && (
             <>
               <Alert
@@ -852,7 +688,7 @@ export default function Workspace() {
       </Layout>
       <Drawer
         open={!!detail}
-        extra={!isAdmin && detail?.assignment.pending === state?.identity ? <Space><Button type="primary" loading={saving} onClick={()=>void decideAssignment(true)}>接受</Button><Button loading={saving} onClick={promptReturn}>退回</Button></Space> : undefined}
+        extra={detail?.assignment.pending === state?.identity ? <Space><Button type="primary" loading={saving} onClick={()=>void decideAssignment(true)}>接受</Button><Button loading={saving} onClick={promptReturn}>退回</Button></Space> : undefined}
         onClose={() => setDetail(undefined)}
         title="客户线索详情"
         className="pipeline-detail-drawer"
@@ -979,24 +815,10 @@ export default function Workspace() {
                   <Button disabled={!returnReason.trim()} loading={saving} onClick={() => void decideAssignment(false)}>退回管理员</Button>
                 </Space>
               ) : detail.assignment?.owner === state?.identity ? (
-                <Space direction="vertical" style={{ width: "100%" }}>
-                  <Select
-                    aria-label="跟进阶段"
-                    value={followupStage}
-                    onChange={setFollowupStage}
-                    options={["待联系", "跟进中", "等待客户", "等待内部", "稍后跟进", "结束"].map((value) => ({ label: value, value }))}
-                  />
-                  {detail.followup?.next_step && <Text type="secondary">上次下一步：{detail.followup.next_step}</Text>}
-                  {detail.followup?.due_at && <Text type="secondary">计划时间：{detail.followup.due_at}</Text>}
-                  <Input value={nextStep} onChange={(e) => setNextStep(e.target.value)} placeholder="下一步要做什么" maxLength={500} />
-                  <Input value={dueAt} onChange={(e) => setDueAt(e.target.value)} type="date" aria-label="下次跟进日期" maxLength={40} />
-                  <Button type="primary" loading={saving} onClick={() => void saveFollowup()}>保存跟进计划</Button>
-                </Space>
+                <Text type="secondary">请在下方记录客户进展和下一步。</Text>
               ) : <Text type="secondary">这条线索尚未分配给你。</Text>}
             </Card>
-            <Card className="section-card" title="交接记录">
-              {(detail.assignment.history ?? []).length ? <Timeline items={detail.assignment.history!.map(event=>({key:event.version,children:<div><strong>{{offered:"发起分配",accepted:"确认接手",declined:"退回",cancelled:"撤回"}[event.action] || event.action}</strong><div className="pipeline-history-person">{event.recipient||event.actor}</div><Text type="secondary">{event.actor} · {new Date(event.created_at).toLocaleString()}</Text>{event.reason && <Paragraph>原因：{event.reason}</Paragraph>}</div>}))} /> : <Text type="secondary">暂无新交接记录</Text>}
-            </Card>
+            <CustomerProgress key={detail.id} account={detail} accounts={data} identity={state?.identity ?? ""} admin={isAdmin} refresh={refresh} onAccount={openDetail} />
             <Alert
               className="section-card"
               showIcon
