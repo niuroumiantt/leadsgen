@@ -8,8 +8,10 @@ from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+from .collection import CollectionStore
 from .crawl import normalize_url
 from .policy import CADENCE_DAYS, POLICY_VERSION, ROLE_NAMES
+from .workflow import WorkflowStore
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS account (
@@ -74,12 +76,14 @@ def now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-class Store:
+class Store(WorkflowStore, CollectionStore):
     def __init__(self, path: Path):
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self.migrate_workflow(conn)
+            self.migrate_collection(conn)
         path.chmod(0o600)
 
     @contextmanager
@@ -153,6 +157,12 @@ class Store:
                     else "unassigned"
                 )
                 account["followup"] = dict(followup) if followup else None
+                account["workflow"] = self.workflow(c, row["id"])
+                company = c.execute(
+                    "SELECT company_id,version FROM account_company WHERE account_id=?",
+                    (row["id"],),
+                ).fetchone()
+                account["company"] = dict(company) if company else None
                 account["assignment"]["mail_access_status"] = (
                     mail_access["state"] if mail_access else "not_required"
                 )
@@ -290,6 +300,12 @@ class Store:
                                 event.get("reason", ""),
                             ),
                         )
+
+                for row in existing:
+                    for event in c.execute(
+                        "SELECT * FROM assignment_event WHERE account_id=?", (row["id"],)
+                    ).fetchall():
+                        self.assignment_activity(c, dict(event))
 
                 # Only new offers explicitly request notification. Historical imports never send.
                 offered = next(
@@ -477,6 +493,18 @@ class Store:
             "VALUES(?,?,?,?,?,?,?)",
             (account_id, actor, action, recipient, reason.strip(), version, now()),
         )
+        WorkflowStore.assignment_activity(
+            c,
+            {
+                "account_id": account_id,
+                "actor": actor,
+                "action": action,
+                "recipient": recipient,
+                "version": version,
+                "reason": reason.strip(),
+                "created_at": now(),
+            },
+        )
 
     def cancel_assignment(self, account_id: str, actor: str, version: int) -> dict:
         with self.connect() as c:
@@ -502,33 +530,9 @@ class Store:
     def update_followup(
         self, account_id: str, actor: str, stage: str, next_step: str, due_at: str
     ) -> dict:
-        allowed = {"待联系", "跟进中", "等待客户", "等待内部", "稍后跟进", "结束"}
-        if stage not in allowed:
-            raise ValueError("跟进阶段无效")
-        if len(next_step) > 500 or len(due_at) > 40:
-            raise ValueError("下一步内容过长")
-        if due_at.strip():
-            try:
-                datetime.strptime(due_at.strip(), "%Y-%m-%d")
-            except ValueError:
-                raise ValueError("下次跟进日期必须为 YYYY-MM-DD") from None
         with self.connect() as c:
             c.execute("BEGIN IMMEDIATE")
-            current = c.execute(
-                "SELECT owner FROM account_assignment WHERE account_id=?", (account_id,)
-            ).fetchone()
-            if not current or current["owner"] != actor:
-                raise PermissionError("只有当前负责人可以更新跟进状态")
-            c.execute(
-                "INSERT INTO account_followup(account_id,stage,next_step,due_at,"
-                "updated_by,updated_at) VALUES(?,?,?,?,?,?) "
-                "ON CONFLICT(account_id) DO UPDATE SET stage=excluded.stage, "
-                "next_step=excluded.next_step,due_at=excluded.due_at,updated_by=excluded.updated_by,"
-                "updated_at=excluded.updated_at",
-                (account_id, stage, next_step.strip(), due_at.strip(), actor, now()),
-            )
-            self.audit(c, actor, "followup.updated", account_id)
-            return {"stage": stage, "next_step": next_step.strip(), "due_at": due_at.strip()}
+            return self.save_followup(c, account_id, actor, stage, next_step, due_at)
 
     def jobs(self) -> list[dict]:
         with self.connect() as c:
@@ -537,10 +541,22 @@ class Store:
                 job["candidates"] = [
                     dict(r)
                     for r in c.execute(
-                        "SELECT id,url,status,reason,pages FROM candidate WHERE job_id=?",
+                        "SELECT id,url,status,reason,pages,updated_at FROM candidate WHERE "
+                        "job_id=?",
                         (job["id"],),
                     )
                 ]
+                for candidate in job["candidates"]:
+                    attempt = c.execute(
+                        "SELECT id,number,account_id,result_action,legacy FROM crawl_attempt "
+                        "WHERE candidate_id=? ORDER BY number DESC LIMIT 1",
+                        (candidate["id"],),
+                    ).fetchone()
+                    candidate["lastAttempt"] = dict(attempt) if attempt else None
+                    due = c.execute(
+                        "SELECT next_at FROM crawl_retry WHERE candidate_id=?", (candidate["id"],)
+                    ).fetchone()
+                    candidate["nextAt"] = due["next_at"] if due else None
             return jobs
 
     def create_job(self, name: str, region: str, seeds: list[dict], actor: str) -> str:
@@ -559,33 +575,31 @@ class Store:
     def recover(self):
         # One worker per instance. Only called before starting it, never per request.
         with self.connect() as c:
+            c.execute("BEGIN IMMEDIATE")
+            c.execute(
+                "UPDATE crawl_attempt SET "
+                "status='interrupted',reason='resumed_after_restart',finished_at=? "
+                "WHERE status='running'",
+                (now(),),
+            )
             c.execute(
                 "UPDATE candidate SET status='queued',reason='resumed_after_restart' "
                 "WHERE status='running'"
             )
             c.execute("UPDATE handoff SET status='queued' WHERE status='delivering'")
 
-    def claim(self) -> dict | None:
-        with self.connect() as c:
-            c.execute("BEGIN IMMEDIATE")
-            row = c.execute(
-                "SELECT * FROM candidate WHERE status='queued' ORDER BY id LIMIT 1"
-            ).fetchone()
-            if not row:
-                return None
-            c.execute(
-                "UPDATE candidate SET status='running',updated_at=? WHERE id=?", (now(), row["id"])
-            )
-            return dict(row)
-
     def finish(self, candidate: dict, result: dict):
         with self.connect() as c:
             c.execute("BEGIN IMMEDIATE")
+            if not self.active_attempt(c, candidate):
+                return  # Duplicate or interrupted completions cannot overwrite a newer attempt.
+            account_id, action = None, ""
             if result.get("account"):
                 account = result["account"]
                 old = c.execute(
                     "SELECT payload FROM account WHERE domain=?", (account["domain"],)
                 ).fetchone()
+                action = "updated" if old else "created"
                 if old:
                     existing = json.loads(old[0])
                     # Recrawling never resets outreach, approval or a selected recipient.
@@ -628,6 +642,21 @@ class Store:
                         now(),
                     ),
                 )
+                account_id = account["id"]
+                self.activity(
+                    c,
+                    account_id,
+                    "discovery.completed",
+                    "crawler",
+                    {
+                        "candidateId": candidate["id"],
+                        "attemptId": candidate["attempt_id"],
+                        "result": action,
+                        "url": candidate["url"],
+                    },
+                    key=f"crawl:{candidate['attempt_id']}",
+                )
+            self.finish_attempt(c, candidate, result, account_id, action)
             c.execute(
                 "UPDATE candidate SET status=?,reason=?,pages=?,updated_at=? WHERE id=?",
                 (
@@ -960,6 +989,15 @@ class Store:
                         json.dumps(e),
                         e["occurred_at"],
                     ),
+                )
+                self.activity(
+                    c,
+                    e["external_id"],
+                    "mail.event",
+                    "aimail",
+                    e,
+                    key="mail:" + str(e["id"]),
+                    at=e["occurred_at"],
                 )
                 a = json.loads(row[0])
                 if a["mail"] not in {"unsubscribed", "bounced", "replied"}:

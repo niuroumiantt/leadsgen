@@ -55,9 +55,12 @@ def registered_domain(url: str) -> str:
 
 
 def public_addresses(host: str, port: int) -> list[str]:
-    addresses = sorted(
-        {item[4][0] for item in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)}
-    )
+    try:
+        addresses = sorted(
+            {item[4][0] for item in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)}
+        )
+    except OSError as exc:
+        raise CrawlError("dns_error") from exc
     if not addresses or any(
         not ipaddress.ip_address(ip).is_global or ipaddress.ip_address(ip).is_multicast
         for ip in addresses
@@ -121,8 +124,12 @@ def fetch(url: str, domain: str, *, redirects: int = 3) -> Page:
         if not any(t in content_type for t in ("html", "text/plain")):
             raise CrawlError("unsupported_content_type")
         return Page(url, response.status, raw.decode("utf-8", errors="replace"), content_type)
+    except urllib3.exceptions.SSLError as exc:
+        raise CrawlError("tls_error") from exc
+    except urllib3.exceptions.TimeoutError as exc:
+        raise CrawlError("request_timeout") from exc
     except (urllib3.exceptions.HTTPError, OSError) as exc:
-        raise CrawlError("network_or_tls_error") from exc
+        raise CrawlError("network_error") from exc
     finally:
         if response:
             response.close()
@@ -224,14 +231,34 @@ def check_mail_domain(email: str) -> str:
         return "check_unavailable"
 
 
-def crawl(seed: dict, *, fetcher=fetch, mail_check=check_mail_domain, delay: float = 3) -> dict:
+def crawl(
+    seed: dict, *, fetcher=fetch, mail_check=check_mail_domain, delay: float = 3, progress=None
+) -> dict:
+    def emit(phase, **values):
+        if progress:
+            progress({"phase": phase, **values})
+
+    def read(url, domain, phase):
+        emit(phase + "_requested", url=url)
+        try:
+            page = fetcher(url, domain)
+        except CrawlError as exc:
+            emit("request_failed", url=url, reason=str(exc))
+            raise
+        emit(phase + "_received", url=page.url, status=page.status)
+        return page
+
     start = time.monotonic()
     url = normalize_url(seed["url"])
     domain = registered_domain(url)
     origin = urlunsplit((*urlsplit(url)[:2], "", "", ""))
-    robots = fetcher(origin + "/robots.txt", domain)
-    if robots.status in {401, 403, 429} or robots.status >= 500:
-        raise CrawlError("robots_unavailable_or_denied")
+    robots = read(origin + "/robots.txt", domain, "robots")
+    if robots.status in {401, 403}:
+        raise CrawlError("robots_denied")
+    if robots.status == 429:
+        raise CrawlError("robots_rate_limited")
+    if robots.status >= 500:
+        raise CrawlError("robots_unavailable")
     parser = RobotFileParser()
     parser.parse(robots.text.splitlines() if robots.status == 200 else [])
     canonical_origin = urlunsplit((*urlsplit(robots.url)[:2], "", "", ""))
@@ -241,7 +268,9 @@ def crawl(seed: dict, *, fetcher=fetch, mail_check=check_mail_domain, delay: flo
     spacing = max(delay, parser.crawl_delay(AGENT) or 0)
     if spacing > 30:
         raise CrawlError("crawl_delay_exceeds_budget")
+    emit("policy_checked", url=origin, delaySeconds=spacing)
     queue, visited, pages, contacts = [url], set(), [], {}
+    disallowed = 0
     while queue and len(visited) < 8 and time.monotonic() - start < 90:
         target = normalize_url(queue.pop(0))
         if target in visited or registered_domain(target) != domain:
@@ -251,12 +280,14 @@ def crawl(seed: dict, *, fetcher=fetch, mail_check=check_mail_domain, delay: flo
             continue
         visited.add(target)
         if not parser.can_fetch(AGENT, target):
+            disallowed += 1
+            emit("page_skipped", url=target, reason="robots_disallowed")
             continue
         if spacing:
             time.sleep(spacing)
-        page = fetcher(target, domain)
-        if page.status in {403, 429}:
-            break
+        page = read(target, domain, "page")
+        if page.status in {401, 403, 429}:
+            raise CrawlError("rate_limited" if page.status == 429 else "access_denied")
         if page.status != 200:
             continue
         # Redirects within the same registered domain still need origin-specific robots rules.
@@ -266,6 +297,7 @@ def crawl(seed: dict, *, fetcher=fetch, mail_check=check_mail_domain, delay: flo
         pages.append(parsed)
         for c in parsed["contacts"]:
             contacts.setdefault(c["email"].lower(), c)
+        emit("page_parsed", url=page.url, pages=len(pages), contacts=len(contacts))
         for label, href in parsed["links"]:
             if href.startswith(("mailto:", "tel:", "javascript:", "#")):
                 continue
@@ -281,7 +313,13 @@ def crawl(seed: dict, *, fetcher=fetch, mail_check=check_mail_domain, delay: flo
         if not contacts and len(pages) >= 4:
             break
     if not contacts:
-        return {"status": "skipped", "reason": "no_public_business_email", "pages": len(pages)}
+        return {
+            "status": "skipped",
+            "reason": "robots_disallowed"
+            if disallowed == len(visited)
+            else "no_public_business_email",
+            "pages": len(pages),
+        }
     choices = sorted(contacts.values(), key=lambda c: contact_order(c["email"]))
     for contact in choices[:8]:
         contact["mailRoute"] = mail_check(contact["email"])

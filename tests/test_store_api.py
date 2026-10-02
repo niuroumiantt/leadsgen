@@ -400,7 +400,8 @@ def test_recrawl_preserves_selected_email_source(tmp_path):
     a = account()
     a["email"] = "info@example.com"
     a["evidence"] = {"url": "https://example.com/new-contact"}
-    store.finish(task, {"status": "completed", "account": a})
+    store.create_job("recrawl", "美国", [{"url": "https://example.com"}], "tester")
+    store.finish(store.claim(), {"status": "completed", "account": a})
     assert store.accounts()[0]["email"] == "sales@example.com"
     assert store.accounts()[0]["evidence"]["url"] == "https://example.com/contact"
 
@@ -419,7 +420,8 @@ def test_external_public_contact_can_be_reviewed_but_handoff_locks_it(tmp_path):
             "observedAt": "2026-09-23",
         }
     ]
-    store.finish(task, {"status": "completed", "account": a})
+    store.create_job("recrawl", "美国", [{"url": "https://example.com"}], "tester")
+    store.finish(store.claim(), {"status": "completed", "account": a})
     aid = store.accounts()[0]["id"]
     store.select_contact(aid, "owner@external.example", "owner")
     assert store.accounts()[0]["stage"] == "ready"

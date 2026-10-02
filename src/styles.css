@@ -678,3 +678,32 @@ input {
 
 .pipeline-compact-list{padding:0 20px 20px;display:grid;gap:12px}.pipeline-lead-card{padding:18px;border:1px solid #e3e8f0;border-radius:10px;background:#fff}.pipeline-lead-card-heading{display:flex;gap:12px;align-items:flex-start}.pipeline-lead-card-heading>.ant-avatar{flex-shrink:0;background:#edf2fd;color:#365ec9}.pipeline-lead-card-heading>div{flex:1;min-width:0}.pipeline-lead-card-heading h3{font-size:15px;line-height:1.6;margin:0;color:#24334b;overflow-wrap:anywhere}.pipeline-lead-card-heading p{font-size:12px;color:#64748b;margin:4px 0 0;overflow-wrap:anywhere}.pipeline-lead-card-heading>.ant-btn{flex-shrink:0}.pipeline-lead-card-state{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:14px 0;font-size:13px;overflow-wrap:anywhere}.pipeline-lead-card-next{display:flex;align-items:center;gap:10px;flex-wrap:wrap;border-top:1px solid #eef1f6;padding-top:12px;font-size:13px}.pipeline-lead-card-next>span{color:#64748b}.pipeline-lead-card-next strong{font-weight:500;overflow-wrap:anywhere}.pipeline-compact-list>.ant-pagination{justify-self:end}
 @media(max-width:760px){.pipeline-compact-list{padding:0 12px 12px}.pipeline-lead-card{padding:14px}}
+
+/* Live collection and customer progress share the workspace's existing Ant Design tokens. */
+.collection-metrics {display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:16px;margin-top:20px;}
+.collection-metrics strong {display:block;font-size:30px;margin-top:8px;color:#23324c;}
+.worker-status {min-width:240px;padding:8px 20px 8px 0;}
+.break-anywhere {overflow-wrap:anywhere;word-break:break-word;}
+.collection-drawer .ant-card, .pipeline-detail-drawer .ant-card {margin-top:16px;}
+.progress-form-grid {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:0 16px;}
+.milestone-strip {overflow-x:auto;padding:8px 0 20px;margin-bottom:8px;}
+.milestone-strip {display:flex;gap:10px;}
+.milestone-item {display:flex;align-items:center;gap:6px;white-space:nowrap;color:#8a94a5;background:#f7f8fa;padding:8px 12px;border-radius:20px;}
+.milestone-item span {font-size:11px;opacity:.7;}
+.milestone-item.current {background:#ecf2ff;color:#315de6;font-weight:600;}
+.identity-row {display:grid;grid-template-columns:110px minmax(0,1fr);gap:12px;margin-bottom:10px;}
+.activity-entry {padding-bottom:12px;overflow-wrap:anywhere;}
+.activity-entry details {margin-top:8px;color:#7c899e;}
+.activity-entry summary {cursor:pointer;}
+.activity-after {margin-top:10px;padding:12px;background:#f5f8ff;border-left:2px solid #395fec;border-radius:0 6px 6px 0;}
+.source-counts {margin-bottom:20px!important;}
+@media(max-width:700px) {
+ .collection-metrics {grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;}
+ .collection-metrics .ant-card-body {padding:16px;}
+ .progress-form-grid {grid-template-columns:minmax(0,1fr);}
+ .identity-row {grid-template-columns:minmax(0,1fr);gap:2px;}
+ .progress-card .ant-card-head {padding:12px;}
+}
+
+.candidate-mobile {padding:12px 0;border-bottom:1px solid #e9edf4;}
+.candidate-mobile:last-child {border-bottom:0;}

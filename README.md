@@ -5,7 +5,7 @@
 leadsgen 是轻量获客 CRM：负责线索来源、初筛、企业档案、分配、pipeline 状态和统计。
 Aimail 保管邮件原文、附件、线程、AI 阅读结果和员工个人发件身份；员工只获得分给自己的客户记录与邮件线程。
 
-报价、订单、合同及售后不在本轮范围内。
+可记录报价与订单引用和业务阶段；报价文件、订单履约和售后由相应业务系统处理。
 
 ## 当前版本
 
@@ -13,6 +13,7 @@ Aimail 保管邮件原文、附件、线程、AI 阅读结果和员工个人发�
 HTTP 访问默认真实数据；`?demo=1` 或离线 HTML 为 `.example` 合成示例，不发信。
 主动发现只使用公开来源；sales@ 只接收询盘。未经逐封明确批准，不会自动发送客户邮件。
 
+- [采集过程、企业档案与客户进展](docs/customer-progress-2026-10-02.md)
 - [第一版系统设计](docs/design-v1.md)
 - [开发信接线协议](docs/handoff-v2.md)
 - [跨仓库销售工作流与联合检查](https://github.com/niuroumiantt/infra/blob/main/docs/sales-workflow.md)
@@ -35,16 +36,11 @@ uv run python -m leadsgen.app
 源码：`~/code/leadsgen`；运行数据：`~/.local/share/leadsgen/`；日志：`~/.local/state/leadsgen/`；凭据：`~/.config/leadsgen/`。
 真实客户信息、采集页面、邮箱凭据及导出名单不进入 Git。
 
-## 首个生产里程碑
+## 发布状态
 
-2026-09-23：采集工作台已部署至 [leads.glocalstorage.cn](https://leads.glocalstorage.cn)，
-通过 OA 会话保护，生产库已完成美国两个官网的小样本采集。HTTPS、未登录拒绝、
-伪造身份拒绝、容器健康和数据库完整性均已验证。当前机器的 DNS 负缓存尚未刷新，
-因此登录后页面的浏览器验收仍待完成；请勿把离线示例当成生产页面。
+2026-09-23 首次公开采集上线；2026-10-01 四仓销售工作流已分批上线并由 M5 验收。
+详见 [四仓发布记录](https://github.com/niuroumiantt/infra/blob/main/docs/handoff/sales-workflow-release-2026-10-01.md)。
 
-当前 CRM-lite 角色隔离、sales 来信导入、员工接手后单线程授权和跟进状态已在开发分支实现并通过自动化测试；代码尚未部署。
-生产邮箱角色边界已调整为 Larry 可看 sales@ 与个人邮箱、Isaac 只看个人邮箱。新 leadsgen 角色名单和完整浏览器验收仍须随应用发布完成。
-导入/权限令牌不能批准邮件；未配置时队列持久保留，不显示虚假的发送成功。
-# leadsgen
-
-leadsgen is the controlled intake and assignment pipeline for publicly discovered companies and human-confirmed customer inquiries. The first role-separated pipeline slice is described in [docs/lead-pipeline-v1.md](docs/lead-pipeline-v1.md).
+本次新增采集过程、企业关联与客户进展时间线。生产运行版本和升级验收以
+[本批发布记录](https://github.com/niuroumiantt/infra/blob/main/docs/handoff/leadsgen-progress-release-2026-10-02.md) 为准。
+目前仍需输入官网种子；自动搜索发现、定时搜索尚未接入。
