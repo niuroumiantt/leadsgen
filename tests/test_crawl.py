@@ -101,3 +101,117 @@ def test_embedded_vendor_email_does_not_override_company_contact():
         delay=0,
     )
     assert result["account"]["email"] == "sales@example.com"
+
+
+def crawl_fixture(pages):
+    from urllib.parse import urlsplit
+
+    seen = []
+
+    def get(url, domain):
+        path = urlsplit(url).path
+        seen.append(path)
+        return Page(url, 200, pages[path], "text/html")
+
+    result = crawl(
+        {"url": "https://example.com/", "region": "美国"},
+        fetcher=get,
+        mail_check=lambda email: "mx_present",
+        delay=0,
+    )
+    return result, seen
+
+
+def test_footer_contact_is_read_before_company_pages_consume_the_budget():
+    result, seen = crawl_fixture(
+        {
+            "/robots.txt": "User-agent: *\nAllow: /",
+            "/": '<a href="/about">About</a><a href="/company/team">Company team</a>'
+            '<a href="/company/news">Company news</a><a href="/contact">Contact</a>',
+            "/about": "Company overview",
+            "/company/team": "Company team",
+            "/company/news": "Company news",
+            "/contact": "Public business contact: sales@example.com",
+        }
+    )
+    assert result["status"] == "completed"
+    assert result["account"]["email"] == "sales@example.com"
+    assert seen == ["/robots.txt", "/", "/contact"]
+
+
+def test_contact_discovered_on_about_page_precedes_queued_news():
+    result, seen = crawl_fixture(
+        {
+            "/robots.txt": "User-agent: *\nAllow: /",
+            "/": '<a href="/about">About</a><a href="/company/news">Company news</a>'
+            '<a href="/company/team">Company team</a>',
+            "/about": '<a href="/contact">Contact us</a>',
+            "/contact": 'Email <a href="mailto:info@example.com">us</a>',
+        }
+    )
+    assert result["account"]["email"] == "info@example.com"
+    assert seen == ["/robots.txt", "/", "/about", "/contact"]
+
+
+def test_supplier_entry_precedes_support_and_company_pages():
+    result, seen = crawl_fixture(
+        {
+            "/robots.txt": "User-agent: *\nAllow: /",
+            "/": '<a href="/company">Company</a><a href="/support">Support</a>'
+            '<a href="/suppliers">Supplier relations</a>',
+            "/suppliers": "purchasing@example.com",
+        }
+    )
+    assert result["account"]["department"] == "采购 / 供应商入口"
+    assert seen == ["/robots.txt", "/", "/suppliers"]
+
+
+def test_prioritized_contact_still_respects_robots_and_no_email_page_limit():
+    result, seen = crawl_fixture(
+        {
+            "/robots.txt": "User-agent: *\nDisallow: /contact",
+            "/": '<a href="/contact">Contact</a><a href="/about">About</a>'
+            '<a href="/company/team">Company team</a><a href="/company/news">Company news</a>'
+            '<a href="/company/fifth">Company fifth</a>',
+            "/about": "Overview",
+            "/company/team": "Team",
+            "/company/news": "News",
+        }
+    )
+    assert result == {"status": "skipped", "reason": "no_public_business_email", "pages": 4}
+    assert seen == ["/robots.txt", "/", "/about", "/company/team", "/company/news"]
+
+
+def test_contact_priority_uses_page_intent_and_normalized_urls():
+    from leadsgen.crawl import contact_priority
+
+    assert contact_priority("News", "https://contact.example.com/news?contact=yes") is None
+    assert contact_priority("Info", "https://example.com/%E8%81%94%E7%BB%9C") == 0
+    result, seen = crawl_fixture(
+        {
+            "/robots.txt": "User-agent: *\nAllow: /",
+            "/": '<a href="https://vendor.org/contact">Contact vendor</a>'
+            '<a href="https://support.example.com/contact">Contact subdomain</a>'
+            '<a href="javascript:void(0)">Contact</a>'
+            '<a href="/contact#one">Contact</a><a href="/contact#two">Contact again</a>'
+            '<a href="/about">About</a>',
+            "/contact": "Contact form only; no published email",
+            "/about": '<a href="/contact#three">Contact</a>',
+        }
+    )
+    assert result["status"] == "skipped"
+    assert seen == ["/robots.txt", "/", "/contact", "/about"]
+
+
+def test_later_contact_label_promotes_an_existing_company_link():
+    result, seen = crawl_fixture(
+        {
+            "/robots.txt": "User-agent: *\nAllow: /",
+            "/": '<a href="/about">About</a><a href="/company/news">Company news</a>'
+            '<a href="/company/team">Company team</a><a href="/directory">Company</a>'
+            '<a href="/directory#contact">Contact us</a>',
+            "/directory": "sales@example.com",
+        }
+    )
+    assert result["account"]["email"] == "sales@example.com"
+    assert seen == ["/robots.txt", "/", "/directory"]

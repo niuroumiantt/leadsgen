@@ -27,11 +27,26 @@ DOMAIN = tldextract.TLDExtract(suffix_list_urls=())
 EMAIL = re.compile(
     r"[A-Za-z0-9.!#$%&'*+/=?^_`{|}~-]+@[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,63}"
 )
-CONTACT_WORDS = ("contact", "about", "company", "support", "sales", "联系我们", "关于我们")
+CONTACT_PRIORITIES = (
+    ("contact", "联系我们", "联络"),
+    ("sales", "partner", "procurement", "purchasing", "supplier", "vendor", "商务", "采购", "合作"),
+    ("support", "helpdesk", "customer-service", "客服"),
+    ("about", "company", "关于我们", "公司介绍"),
+)
 
 
 class CrawlError(Exception):
     """Safe public status; no response bodies or credentials in errors."""
+
+
+def contact_priority(label: str, url: str) -> int | None:
+    # The host/query is not page intent: e.g. every page on support.example.com
+    # must not outrank a real contact page. Decode paths for localized links.
+    intent = (label + " " + unquote(urlsplit(url).path)).casefold()
+    return next(
+        (rank for rank, words in enumerate(CONTACT_PRIORITIES) if any(w in intent for w in words)),
+        None,
+    )
 
 
 def normalize_url(url: str) -> str:
@@ -269,10 +284,13 @@ def crawl(
     if spacing > 30:
         raise CrawlError("crawl_delay_exceeds_budget")
     emit("policy_checked", url=origin, delaySeconds=spacing)
-    queue, visited, pages, contacts = [url], set(), [], {}
+    queue, visited, pages, contacts = {url: -1}, set(), [], {}
     disallowed = 0
     while queue and len(visited) < 8 and time.monotonic() - start < 90:
-        target = normalize_url(queue.pop(0))
+        # dict order breaks ties by discovery order; newly found contact pages
+        # outrank company/news pages already waiting in the bounded queue.
+        target = min(queue, key=queue.__getitem__)
+        queue.pop(target)
         if target in visited or registered_domain(target) != domain:
             continue
         if urlsplit(target).netloc != urlsplit(origin).netloc:
@@ -299,15 +317,21 @@ def crawl(
             contacts.setdefault(c["email"].lower(), c)
         emit("page_parsed", url=page.url, pages=len(pages), contacts=len(contacts))
         for label, href in parsed["links"]:
-            if href.startswith(("mailto:", "tel:", "javascript:", "#")):
+            if href.casefold().startswith(("mailto:", "tel:", "javascript:", "#")):
                 continue
-            if any(word in (label + " " + href).lower() for word in CONTACT_WORDS):
-                candidate = urljoin(page.url, href)
-                try:
-                    if registered_domain(candidate) == domain and candidate not in queue:
-                        queue.append(candidate)
-                except CrawlError:
-                    pass
+            try:
+                candidate = normalize_url(urljoin(page.url, href))
+                priority = contact_priority(label, candidate)
+                if (
+                    priority is not None
+                    and registered_domain(candidate) == domain
+                    and urlsplit(candidate).netloc == urlsplit(origin).netloc
+                    and candidate not in visited
+                ):
+                    # A later, clearer link label may promote the same URL.
+                    queue[candidate] = min(priority, queue.get(candidate, priority))
+            except (CrawlError, ValueError):
+                continue
         if contacts and len(pages) >= 2:
             break
         if not contacts and len(pages) >= 4:
