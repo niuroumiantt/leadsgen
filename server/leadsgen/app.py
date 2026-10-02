@@ -18,7 +18,10 @@ from pydantic import BaseModel, Field
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from .crawl import CrawlError, crawl
+from .discovery import discovery_worker
+from .discovery_api import routes as discovery_routes
 from .policy import CADENCE_DAYS, POLICY_VERSION
+from .search import SearchServices
 from .store import Store, now
 from .workflow import VersionConflict
 
@@ -399,8 +402,10 @@ def create_app(
     integration_token: str = "",
     admin_users: tuple[str, ...] = (),
     sales_users: tuple[str, ...] = (),
+    search_services: SearchServices | None = None,
 ) -> FastAPI:
     store = Store(path)
+    search_services = search_services or SearchServices()
     stop = threading.Event()
 
     @asynccontextmanager
@@ -408,9 +413,11 @@ def create_app(
         threads = []
         if worker_enabled:
             store.recover()
+            store.recover_discovery()
             for target, args in (
                 (worker, (store, stop, endpoint, integration_token)),
                 (collection_worker, (store, stop)),
+                (discovery_worker, (store, stop, search_services)),
             ):
                 thread = threading.Thread(target=target, args=args, daemon=True)
                 threads.append(thread)
@@ -709,6 +716,8 @@ def create_app(
             raise HTTPException(409, str(exc)) from exc
         return {"ok": True}
 
+    app.include_router(discovery_routes(store, search_services))
+
     @app.get("/{path:path}")
     def frontend(path: str):
         if (
@@ -742,6 +751,13 @@ def main():
         integration_token=os.environ.get("LEADSGEN_MAIL_TOKEN", ""),
         admin_users=tuple(os.environ.get("LEADSGEN_ADMIN_USERS", "").split(",")),
         sales_users=tuple(os.environ.get("LEADSGEN_SALES_USERS", "").split(",")),
+        search_services=SearchServices(
+            keys={
+                "brave": os.environ.get("LEADSGEN_BRAVE_API_KEY", ""),
+                "tavily": os.environ.get("LEADSGEN_TAVILY_API_KEY", ""),
+            },
+            daily_limit=int(os.environ.get("LEADSGEN_SEARCH_DAILY_LIMIT", "20")),
+        ),
     )
     uvicorn.run(app, host=host, port=int(os.environ.get("LEADSGEN_PORT", "8910")))
 
