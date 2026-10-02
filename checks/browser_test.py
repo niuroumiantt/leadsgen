@@ -130,7 +130,7 @@ def test_real_workspace_progress_conflicts_collection_and_mobile(workspace):
         drawer.get_by_role("button", name="关闭", exact=True).click()
         page.get_by_role("menuitem", name="采集任务", exact=False).click()
         expect(
-            page.get_by_text("当前按官网名单采集 · 尚未启用定时搜索", exact=True)
+            page.get_by_text("官网采集队列 · 承接手动名单与发现计划", exact=True)
         ).to_be_visible()
         page.locator(".ant-table-row-expand-icon").first.click()
         network = page.locator("tr.ant-table-row").filter(has_text="https://network.example")

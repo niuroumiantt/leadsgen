@@ -122,7 +122,9 @@ export default function CollectionWorkspace({
   refresh,
   onNewJob,
   onAccount,
+  initialCandidate,
 }: {
+  initialCandidate?: number;
   jobs: Job[];
   status: CollectionStatus | null;
   accounts: LiveAccount[];
@@ -132,7 +134,8 @@ export default function CollectionWorkspace({
 }) {
   const { message } = App.useApp();
   const screens = Grid.useBreakpoint();
-  const [selected, setSelected] = useState<number>();
+  const [selected, setSelected] = useState<number | undefined>(initialCandidate);
+  useEffect(()=>setSelected(initialCandidate),[initialCandidate]);
   const candidate = jobs
     .flatMap((j) => j.candidates)
     .find((c) => c.id === selected);
@@ -184,8 +187,8 @@ export default function CollectionWorkspace({
       <Alert
         showIcon
         type="info"
-        title="当前按官网名单采集 · 尚未启用定时搜索"
-        description={`每批 1–30 个官网；同站请求至少间隔 ${status?.siteDelaySeconds ?? 3} 秒，并遵守网站要求。后台每 ${status?.idlePollSeconds ?? 5} 秒检查队列，这不代表每 5 秒搜索新客户。`}
+        title="官网采集队列 · 承接手动名单与发现计划"
+        description={`每批 1–30 个官网；同站请求至少间隔 ${status?.siteDelaySeconds ?? 3} 秒，并遵守网站要求。后台每 ${status?.idlePollSeconds ?? 5} 秒检查队列。自动发现的频率和结果请到“发现计划”查看。`}
       />
       <div className="collection-metrics">
         {[

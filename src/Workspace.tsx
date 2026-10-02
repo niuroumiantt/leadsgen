@@ -39,6 +39,7 @@ import type { LiveAccount, State } from "./live-types";
 import { milestones } from "./live-types";
 import { api } from "./api";
 import CollectionWorkspace from "./CollectionWorkspace";
+import DiscoveryWorkspace from "./DiscoveryWorkspace";
 import CustomerProgress from "./CustomerProgress";
 
 const { Title, Text, Paragraph } = Typography;
@@ -61,6 +62,7 @@ export default function Workspace() {
   const [selection, setSelection] = useState<React.Key[]>([]);
   const [detail, setDetail] = useState<LiveAccount>();
   const [jobOpen, setJobOpen] = useState(false);
+  const [collectionCandidate, setCollectionCandidate] = useState<number>();
   const [handoffOpen, setHandoffOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [assignee, setAssignee] = useState("");
@@ -217,6 +219,7 @@ export default function Workspace() {
   const items = isAdmin
     ? [
         { key: "accounts", icon: <TeamOutlined />, label: "线索总览" },
+        { key: "discovery", icon: <SearchOutlined />, label: "发现计划" },
         { key: "jobs", icon: <CompassOutlined />, label: "采集任务" },
         { key: "outreach", icon: <LinkOutlined />, label: "开发信与联系状态" },
       ]
@@ -369,7 +372,7 @@ export default function Workspace() {
               className="section-card"
             />
           )}
-          <div className="page-heading">
+          {page !== "discovery" && <div className="page-heading">
             <div>
               <div className="eyebrow">
                 LEAD MANAGEMENT
@@ -377,7 +380,7 @@ export default function Workspace() {
               <Title level={2}>
                 {page === "accounts"
                   ? isAdmin ? "线索总览" : "我的线索"
-                  : page === "jobs"
+                  : page === "discovery" ? "发现计划" : page === "jobs"
                     ? "采集工作台"
                     : "首封之后，按计划继续联系。"}
               </Title>
@@ -385,14 +388,14 @@ export default function Workspace() {
                 {isAdmin ? "按企业组织主动开发与客户来信，查看业务阶段、交接和下一步。" : "查看交接摘要，接受或退回线索，并记录下一步行动。"}
               </Paragraph>
             </div>
-            {isAdmin && <Button
+            {isAdmin && page !== "discovery" && <Button
               type="primary"
               icon={<PlusOutlined />}
               onClick={() => setJobOpen(true)}
             >
               新建采集任务
             </Button>}
-          </div>
+          </div>}
           {page === "accounts" && (
             <>
               <Paragraph type="secondary" className="source-counts">{new Set(data.map(a => a.company.company_id)).size} 个企业档案 · {data.filter(a=>a.sourceType !== "sales_inbound").length} 条官网来源 · {data.filter(a=>a.sourceType === "sales_inbound").length} 条来信来源；同一企业的不同询价保留各自进展。</Paragraph>
@@ -612,7 +615,8 @@ export default function Workspace() {
               </div>
             </>
           )}
-          {page === "jobs" && <CollectionWorkspace jobs={state?.jobs ?? []} status={state?.collection ?? null} accounts={data} refresh={refresh} onNewJob={(url) => {form.setFieldsValue({urls:url}); setJobOpen(true);}} onAccount={openDetail} />}
+          {page === "discovery" && isAdmin && <DiscoveryWorkspace onCollectionChanged={refresh} onCandidate={id=>{setCollectionCandidate(id);setPage("jobs");}} onAccount={id=>{const a=data.find(a=>a.id===id);if(a)openDetail(a);else {void refresh();message.info("客户资料正在更新，请刷新后重试。");}}} />}
+          {page === "jobs" && <CollectionWorkspace initialCandidate={collectionCandidate} jobs={state?.jobs ?? []} status={state?.collection ?? null} accounts={data} refresh={refresh} onNewJob={(url) => {form.setFieldsValue({urls:url}); setJobOpen(true);}} onAccount={openDetail} />}
           {page === "outreach" && (
             <>
               <Alert

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from .collection import CollectionStore
 from .crawl import normalize_url
+from .discovery import DiscoveryStore
 from .policy import CADENCE_DAYS, POLICY_VERSION, ROLE_NAMES
 from .workflow import WorkflowStore
 
@@ -76,7 +77,7 @@ def now() -> str:
     return datetime.now(UTC).isoformat()
 
 
-class Store(WorkflowStore, CollectionStore):
+class Store(WorkflowStore, CollectionStore, DiscoveryStore):
     def __init__(self, path: Path):
         self.path = path
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -84,6 +85,7 @@ class Store(WorkflowStore, CollectionStore):
             conn.executescript(SCHEMA)
             self.migrate_workflow(conn)
             self.migrate_collection(conn)
+            self.migrate_discovery(conn)
         path.chmod(0o600)
 
     @contextmanager
@@ -569,6 +571,10 @@ class Store(WorkflowStore, CollectionStore):
                     "INSERT OR IGNORE INTO candidate(job_id,url,seed,updated_at) VALUES(?,?,?,?)",
                     (job_id, seed["url"], json.dumps(seed, ensure_ascii=False), now()),
                 )
+            for candidate in c.execute(
+                "SELECT id,url FROM candidate WHERE job_id=?", (job_id,)
+            ).fetchall():
+                self.register_site(c, candidate["id"], candidate["url"])
             self.audit(c, actor, "job.created", job_id)
         return job_id
 

@@ -13,6 +13,7 @@ Aimail 保管邮件原文、附件、线程、AI 阅读结果和员工个人发�
 HTTP 访问默认真实数据；`?demo=1` 或离线 HTML 为 `.example` 合成示例，不发信。
 主动发现只使用公开来源；sales@ 只接收询盘。未经逐封明确批准，不会自动发送客户邮件。
 
+- [目标市场发现计划、频率与搜索过程](docs/discovery-plans-2026-10-02.md)
 - [采集过程、企业档案与客户进展](docs/customer-progress-2026-10-02.md)
 - [第一版系统设计](docs/design-v1.md)
 - [开发信接线协议](docs/handoff-v2.md)
@@ -43,4 +44,5 @@ uv run python -m leadsgen.app
 
 本次新增采集过程、企业关联与客户进展时间线。生产运行版本和升级验收以
 [本批发布记录](https://github.com/niuroumiantt/infra/blob/main/docs/handoff/leadsgen-progress-release-2026-10-02.md) 为准。
-目前仍需输入官网种子；自动搜索发现、定时搜索尚未接入。
+新增目标市场发现计划、Brave/Tavily 接口、定时搜索和候选审核；生产服务接入与运行验收以
+[发现计划发布检查点](https://github.com/niuroumiantt/infra/blob/main/docs/handoff/leadsgen-discovery-release-2026-10-02.md) 为准。
