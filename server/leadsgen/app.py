@@ -310,11 +310,12 @@ def sync_followup_access(store: Store, endpoint: str, token: str):
         attempts = item["attempts"] + 1
         try:
             response = httpx.post(
-                endpoint.rstrip("/") + "/v1/followups/access",
+                endpoint.rstrip("/") + "/v2/followups/access",
                 json={
                     "external_id": item["account_id"],
                     "thread_id": int(item["thread_id"]),
                     "recipient": item["recipient"],
+                    "assignment_version": item["assignment_version"],
                 },
                 headers={"Authorization": "Bearer " + token},
                 timeout=15,
@@ -324,15 +325,19 @@ def sync_followup_access(store: Store, endpoint: str, token: str):
             response.raise_for_status()
             receipt = response.json()
             if (
-                receipt.get("external_id") != item["account_id"]
+                not isinstance(receipt, dict)
+                or receipt.get("external_id") != item["account_id"]
                 or receipt.get("thread_id") != item["thread_id"]
+                or not isinstance(receipt.get("owner"), str)
                 or receipt.get("owner", "").casefold() != item["recipient"].casefold()
+                or type(receipt.get("assignment_version")) is not int
+                or receipt["assignment_version"] != item["assignment_version"]
             ):
                 raise ValueError("invalid_followup_access_receipt")
-            store.mark_followup_grant(item["account_id"], success=True, attempts=attempts)
+            store.mark_followup_grant(item, success=True, attempts=attempts)
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
             store.mark_followup_grant(
-                item["account_id"],
+                item,
                 success=False,
                 attempts=attempts,
                 error="Aimail 尚未确认邮件线程权限，系统稍后重试",
