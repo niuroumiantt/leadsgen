@@ -110,10 +110,11 @@ def test_confirmed_sales_inquiry_import_is_idempotent_and_never_becomes_outreach
             "account_id": account["id"],
             "recipient": "isaac@example.com",
             "thread_id": "991",
+            "assignment_version": 2,
             "attempts": 0,
         }
     ]
-    store.mark_followup_grant(account["id"], success=True, attempts=1)
+    store.mark_followup_grant(pending[0], success=True, attempts=1)
     assert store.accounts()[0]["assignment"]["mail_access_status"] == "granted"
 
 
@@ -145,6 +146,7 @@ def test_followup_access_sync_posts_only_assigned_thread_and_checks_receipt(tmp_
                 "thread_id": "991",
                 "owner": "isaac@example.com",
                 "version": 1,
+                "assignment_version": 2,
             },
         )
 
@@ -152,11 +154,12 @@ def test_followup_access_sync_posts_only_assigned_thread_and_checks_receipt(tmp_
     sync_followup_access(store, "https://mail.example", "private-token")
     assert len(calls) == 1
     url, request = calls[0]
-    assert url == "https://mail.example/v1/followups/access"
+    assert url == "https://mail.example/v2/followups/access"
     assert request["json"] == {
         "external_id": account_id,
         "thread_id": 991,
         "recipient": "isaac@example.com",
+        "assignment_version": 2,
     }
     assert store.pending_followup_grants() == []
     assert store.accounts()[0]["assignment"]["mail_access_status"] == "granted"

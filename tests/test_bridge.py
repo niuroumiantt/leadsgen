@@ -100,6 +100,84 @@ def test_import_approve_simulated_send_and_return_events(tmp_path, monkeypatch):
     conn.close()
 
 
+@pytest.mark.parametrize("old_request_first", [True, False], ids=["late-receipt", "late-request"])
+def test_reassigned_owner_keeps_access_when_old_request_or_receipt_arrives_late(
+    tmp_path,
+    monkeypatch,
+    old_request_first,
+):
+    token = "bridge-test-only"
+    owners = ("a@example.test", "b@example.test")
+    conn = connect(tmp_path / "mail.sqlite3")
+    mailbox = ensure_mailbox(conn, "sales@glocalstorage.com")
+    incoming = EmailMessage()
+    incoming["From"], incoming["To"] = "buyer@example.test", "sales@glocalstorage.com"
+    incoming["Subject"], incoming["Message-ID"] = "RFQ", "<race@example.test>"
+    incoming.set_content("Please quote 48 units.")
+    pk, _ = store_raw(conn, mailbox, incoming.as_bytes(), "in", datetime.now(UTC))
+    tid = conn.execute("SELECT thread_id FROM message WHERE id=?", (pk,)).fetchone()[0]
+    store = Store(tmp_path / "leads.sqlite3")
+    store.import_confirmed_leads(
+        [
+            {
+                "version": "lead@1",
+                "id": "42",
+                "source": {
+                    "mailbox": "sales@glocalstorage.com",
+                    "thread_id": str(tid),
+                },
+            }
+        ],
+        "",
+        42,
+    )
+    aid = store.accounts()[0]["id"]
+    store.assign(aid, owners[0], "admin", 0)
+    store.accept_assignment(aid, owners[0], 1)
+    app = create_app(
+        conn,
+        mailbox,
+        require_oa_auth=True,
+        followup_members=owners,
+        outreach_import_token=token,
+    )
+    with TestClient(app) as client:
+        calls = []
+
+        def post(url, **kwargs):
+            body = kwargs["json"]
+            calls.append(body["assignment_version"])
+            if body["assignment_version"] == 4:
+                return client.post(httpx.URL(url).path, json=body, headers=kwargs["headers"])
+            assert body["assignment_version"] == 2
+            if old_request_first:
+                delayed = client.post(httpx.URL(url).path, json=body, headers=kwargs["headers"])
+                assert delayed.status_code == 200
+            store.assign(aid, owners[1], "admin", 2)
+            store.accept_assignment(aid, owners[1], 3)
+            sync_followup_access(store, "https://mail.test", token)
+            if not old_request_first:
+                delayed = client.post(httpx.URL(url).path, json=body, headers=kwargs["headers"])
+                assert delayed.status_code == 409
+            return delayed
+
+        monkeypatch.setattr(httpx, "post", post)
+        sync_followup_access(store, "https://mail.test", token)
+        assert calls == [2, 4]
+        assert followup.get(conn, tid)["owner"] == owners[1]
+        assert store.accounts()[0]["assignment"]["mail_access_status"] == "granted"
+        assert store.pending_followup_grants() == []
+        for owner, status in [(owners[0], 403), (owners[1], 200)]:
+            assert (
+                client.get(
+                    f"/api/followups/{tid}",
+                    headers={"X-OA-User": owner, "X-OA-Email": owner},
+                ).status_code
+                == status
+            )
+    conn.close()
+
+
 @pytest.mark.parametrize("projected", [False, True], ids=["leadsgen-owner", "aimail-owner"])
 def test_confirm_assign_notify_accept_and_thread_access(tmp_path, monkeypatch, projected):
     """两个真实 API + 临时数据库，仅替换 HTTP 传输和 SMTP，不伪造回执。"""

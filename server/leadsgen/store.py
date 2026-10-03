@@ -68,7 +68,8 @@ CREATE TABLE IF NOT EXISTS aimail_lead_map (
 CREATE TABLE IF NOT EXISTS followup_access_sync (
  account_id TEXT PRIMARY KEY REFERENCES account(id), recipient TEXT NOT NULL,
  thread_id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'queued', attempts INTEGER NOT NULL DEFAULT 0,
- updated_at TEXT NOT NULL, next_at TEXT NOT NULL, last_error TEXT NOT NULL DEFAULT ''
+ updated_at TEXT NOT NULL, next_at TEXT NOT NULL, last_error TEXT NOT NULL DEFAULT '',
+ assignment_version INTEGER NOT NULL DEFAULT 0
 );
 """
 
@@ -83,10 +84,36 @@ class Store(WorkflowStore, CollectionStore, DiscoveryStore):
         path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            self.migrate_followup_access(conn)
             self.migrate_workflow(conn)
             self.migrate_collection(conn)
             self.migrate_discovery(conn)
         path.chmod(0o600)
+
+    @staticmethod
+    def migrate_followup_access(conn):
+        """Re-establish versioned remote access once for an existing queue."""
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if "assignment_version" in {
+                row["name"] for row in conn.execute("PRAGMA table_info(followup_access_sync)")
+            }:
+                return
+            conn.execute(
+                "ALTER TABLE followup_access_sync "
+                "ADD COLUMN assignment_version INTEGER NOT NULL DEFAULT 0"
+            )
+            conn.execute(
+                "UPDATE followup_access_sync SET assignment_version=COALESCE("
+                "(SELECT MAX(e.version) FROM assignment_event e "
+                "WHERE e.account_id=followup_access_sync.account_id AND e.action='accepted' "
+                "AND e.recipient=followup_access_sync.recipient),"
+                "(SELECT a.version FROM account_assignment a "
+                "WHERE a.account_id=followup_access_sync.account_id "
+                "AND a.owner=followup_access_sync.recipient AND a.pending=''),0),"
+                "state='queued',attempts=0,next_at=?,last_error=''",
+                (now(),),
+            )
 
     @contextmanager
     def connect(self):
@@ -450,12 +477,14 @@ class Store(WorkflowStore, CollectionStore, DiscoveryStore):
             if account.get("sourceType") == "sales_inbound" and account.get("aimailThreadId"):
                 c.execute(
                     "INSERT INTO followup_access_sync "
-                    "(account_id,recipient,thread_id,updated_at,next_at) VALUES(?,?,?,?,?) "
+                    "(account_id,recipient,thread_id,updated_at,next_at,assignment_version) "
+                    "VALUES(?,?,?,?,?,?) "
                     "ON CONFLICT(account_id) DO UPDATE SET recipient=excluded.recipient,"
                     "thread_id=excluded.thread_id,state='queued',updated_at=excluded.updated_at,"
-                    "next_at=excluded.next_at,"
+                    "next_at=excluded.next_at,assignment_version=excluded.assignment_version,"
+                    "attempts=0,"
                     "last_error=''",
-                    (account_id, actor, account["aimailThreadId"], now(), now()),
+                    (account_id, actor, account["aimailThreadId"], now(), now(), new_version),
                 )
             self.assignment_event(c, account_id, actor, "accepted", actor, new_version)
             self.audit(c, actor, "assignment.accepted", account_id)
@@ -772,20 +801,21 @@ class Store(WorkflowStore, CollectionStore, DiscoveryStore):
     def pending_followup_grants(self) -> list[dict]:
         with self.connect() as c:
             rows = c.execute(
-                "SELECT account_id,recipient,thread_id,attempts FROM followup_access_sync "
+                "SELECT account_id,recipient,thread_id,assignment_version,attempts "
+                "FROM followup_access_sync "
                 "WHERE state='queued' AND next_at<=? ORDER BY updated_at LIMIT 50",
                 (now(),),
             ).fetchall()
             return [dict(row) for row in rows]
 
-    def mark_followup_grant(
-        self, account_id: str, *, success: bool, attempts: int, error: str = ""
-    ):
+    def mark_followup_grant(self, grant: dict, *, success: bool, attempts: int, error: str = ""):
+        """Acknowledge only the queued request that actually received this response."""
         with self.connect() as c:
             c.execute(
                 "UPDATE followup_access_sync "
                 "SET state=?,attempts=?,updated_at=?,next_at=?,last_error=? "
-                "WHERE account_id=?",
+                "WHERE account_id=? AND recipient=? AND thread_id=? "
+                "AND assignment_version=? AND state='queued'",
                 (
                     "granted" if success else "queued",
                     attempts,
@@ -796,7 +826,10 @@ class Store(WorkflowStore, CollectionStore, DiscoveryStore):
                         datetime.now(UTC) + timedelta(seconds=min(3600, 30 * 2 ** min(attempts, 7)))
                     ).isoformat(),
                     "" if success else error,
-                    account_id,
+                    grant["account_id"],
+                    grant["recipient"],
+                    grant["thread_id"],
+                    grant["assignment_version"],
                 ),
             )
 

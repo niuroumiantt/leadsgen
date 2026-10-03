@@ -17,6 +17,7 @@ HTTP 访问默认真实数据；`?demo=1` 或离线 HTML 为 `.example` 合成�
 - [采集过程、企业档案与客户进展](docs/customer-progress-2026-10-02.md)
 - [第一版系统设计](docs/design-v1.md)
 - [开发信接线协议](docs/handoff-v2.md)
+- [接手后的会话授权与升级顺序](docs/thread-access-v2.md)
 - [跨仓库销售工作流与联合检查](https://github.com/niuroumiantt/infra/blob/main/docs/sales-workflow.md)
 - [v0.2 运行与发布说明](docs/release-v0.2.md)
 - 前端：React / TypeScript / Ant Design / Vite
